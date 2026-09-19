@@ -1,15 +1,3 @@
+.R*
 .nextflow*
-work/
-data/
-results/
 .DS_Store
-testing/
-testing*
-*.pyc
-.Rproj.user
-assets/report/renv/
-assets/report/report.Rproj
-.Rprofile
-tests/.venv/
-docs/.venv/
-docs/_build
