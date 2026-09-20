@@ -3,9 +3,8 @@ process CALCULATE_PRS {
     tag "${meta.id}"
 
     label 'process_medium'
-
-    conda "${projectDir}/envs/prs_calc.yml"
-
+    label 'prs_calc_env'
+    
     input:
     tuple val(meta), path(vcf), path(scorefile)
     val target_build
@@ -42,7 +41,7 @@ process CALCULATE_PRS {
 
     bcftools view -h "${vcf}" > vcf_header.txt
 
-    python "${projectDir}/bin/make_vcf_targets.py" \
+    make_vcf_targets.py \
         --scorefile "${scorefile}" \
         --vcf-header "vcf_header.txt" \
         --output "targets.tsv" \
@@ -63,7 +62,7 @@ process CALCULATE_PRS {
         >> queried_genotypes.tsv
     fi
 
-    Rscript "${projectDir}/bin/calculate_prs.R" \
+    calculate_prs.R \
         --scorefile "${scorefile}" \
         --genotypes "queried_genotypes.tsv" \
         --sample-id "${meta.id}" \

@@ -1,10 +1,9 @@
 process MERGE_PRS_REPORTS {
 
     tag 'all_samples'
-
+    
     label 'process_low'
-
-    conda "${projectDir}/envs/prs_calc.yml"
+    label 'prs_calc_env'
 
     input:
     path summaries, stageAs: 'summaries/*'
@@ -16,7 +15,7 @@ process MERGE_PRS_REPORTS {
 
     script:
     """
-    Rscript "${projectDir}/bin/merge_prs_reports.R" \
+    merge_prs_reports.R \
         --summary-dir "summaries" \
         --details-dir "details" \
         --summary-output "prs_scores.tsv" \

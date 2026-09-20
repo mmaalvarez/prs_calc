@@ -19,19 +19,22 @@ def normaliseBuild(def rawBuild) {
         .replaceFirst(/^grch/, '')
         .replaceFirst(/^hg/, '')
 
-    switch (build) {
-        case '38':
-            return 'hg38'
-        case '37':
-            return 'hg37'
-        case '19':
-            return 'hg19'
-        default:
-            throw new IllegalArgumentException(
-                "Unsupported target build '${rawBuild}'. " +
-                'Supported values are hg38, hg37, hg19, 38, 37 and 19.'
-            )
+    if (build == '38') {
+        return 'hg38'
     }
+
+    if (build == '37') {
+        return 'hg37'
+    }
+
+    if (build == '19') {
+        return 'hg19'
+    }
+
+    throw new IllegalArgumentException(
+        "Unsupported target build '${rawBuild}'. " +
+        'Supported values are hg38, hg37, hg19, 38, 37 and 19.'
+    )
 }
 
 
@@ -53,6 +56,20 @@ def stripOuterQuotes(def rawValue) {
 
 workflow {
 
+    workflow.onError {
+        log.error "Pipeline failed: ${workflow.errorMessage}"
+    }
+
+    workflow.onComplete {
+        log.info """
+        Pipeline completed
+        ------------------
+        Status:   ${workflow.success ? 'SUCCESS' : 'FAILED'}
+        Duration: ${workflow.duration}
+        Output:   ${params.outdir}
+        """.stripIndent()
+    }
+    
     /*
      * Validate global parameters.
      */
@@ -94,7 +111,7 @@ workflow {
     try {
         defaultPloidy = params.default_ploidy as Integer
         plotTopVariants = params.plot_top_variants as Integer
-    } catch (Exception ignored) {
+    } catch (Exception _ignored) {
         error '--default_ploidy and --plot_top_variants must be integers'
     }
 
@@ -134,7 +151,7 @@ workflow {
      *
      * Blank lines, comments beginning with #, and a simple header are ignored.
      */
-    ch_parsed_samples = Channel
+    ch_parsed_samples = channel
         .fromPath(inputSheet.toString(), checkIfExists: true)
         .splitText()
         .map { rawLine ->
@@ -244,7 +261,7 @@ workflow {
 
             def duplicates = sampleRows
                 .groupBy { row -> row[0].id }
-                .findAll { id, rows -> rows.size() > 1 }
+                .findAll { _id, rows -> rows.size() > 1 }
                 .keySet()
 
             if (duplicates) {
@@ -260,12 +277,12 @@ workflow {
             sampleRows
         }
 
-    ch_scorefile = Channel.value(scoreFile)
-    ch_target_build = Channel.value(targetBuild)
+    ch_scorefile = channel.value(scoreFile)
+    ch_target_build = channel.value(targetBuild)
 
     ch_phenotypes = phenotypeFile == null
-        ? Channel.empty()
-        : Channel.value(phenotypeFile)
+        ? channel.empty()
+        : channel.value(phenotypeFile)
 
     PRSCALC(
         ch_samples,
@@ -273,20 +290,4 @@ workflow {
         ch_target_build,
         ch_phenotypes
     )
-}
-
-
-workflow.onError {
-    log.error "Pipeline failed: ${workflow.errorMessage}"
-}
-
-
-workflow.onComplete {
-    log.info """
-    Pipeline completed
-    ------------------
-    Status:   ${workflow.success ? 'SUCCESS' : 'FAILED'}
-    Duration: ${workflow.duration}
-    Output:   ${params.outdir}
-    """.stripIndent()
 }
