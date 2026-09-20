@@ -56,20 +56,6 @@ def stripOuterQuotes(def rawValue) {
 
 workflow {
 
-    workflow.onError {
-        log.error "Pipeline failed: ${workflow.errorMessage}"
-    }
-
-    workflow.onComplete {
-        log.info """
-        Pipeline completed
-        ------------------
-        Status:   ${workflow.success ? 'SUCCESS' : 'FAILED'}
-        Duration: ${workflow.duration}
-        Output:   ${params.outdir}
-        """.stripIndent()
-    }
-    
     /*
      * Validate global parameters.
      */
@@ -208,10 +194,10 @@ workflow {
             def vcf = file(resolvedPath.toString(), checkIfExists: true)
             def vcfName = vcf.name
 
-            if (!(vcfName ==~ /(?i).+\.(vcf|bcf)(\.gz|\.bgz)?$/)) {
+            if (!(vcfName ==~ /(?i).+(\.vcf|gvcf|\.bcf)(\.gz|\.bgz)?$/)) {
                 error(
                     "Unsupported input file '${vcf}'. " +
-                    'Expected .vcf, .vcf.gz, .vcf.bgz, .bcf or .bcf.gz.'
+                    'Expected .vcf, .vcf.gz, .vcf.bgz, gvcf.gz, .bcf or .bcf.gz.'
                 )
             }
 
@@ -290,4 +276,18 @@ workflow {
         ch_target_build,
         ch_phenotypes
     )
+
+    workflow.onError {
+        log.error "Pipeline failed: ${workflow.errorMessage ?: 'No error message available'}"
+    }
+
+    workflow.onComplete {
+        log.info """
+                 Pipeline completed
+                 ------------------
+                 Status:   ${workflow.success ? 'SUCCESS' : 'FAILED'}
+                 Duration: ${workflow.duration}
+                 Output:   ${params.outdir}
+                 """.stripIndent()
+    }
 }
