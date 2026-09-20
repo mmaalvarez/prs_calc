@@ -3,8 +3,7 @@ process PLOT_PRS {
     tag "${meta.id}"
 
     label 'process_low'
-
-    conda "${projectDir}/envs/prs_calc.yml"
+    label 'prs_calc_env'
 
     input:
     tuple val(meta), path(summary), path(details)
@@ -19,7 +18,7 @@ process PLOT_PRS {
     def topVariants = params.plot_top_variants as Integer
 
     """
-    Rscript "${projectDir}/bin/plot_prs.R" \
+    plot_prs.R \
         --summary "${summary}" \
         --details "${details}" \
         --sample-id "${meta.id}" \
@@ -35,8 +34,7 @@ process PLOT_PRS_COHORT {
     tag 'all_samples'
 
     label 'process_low'
-
-    conda "${projectDir}/envs/prs_calc.yml"
+    label 'prs_calc_env'
 
     input:
     path summary,    stageAs: 'cohort_prs_scores.tsv'
@@ -49,7 +47,7 @@ process PLOT_PRS_COHORT {
 
     script:
     """
-    Rscript "${projectDir}/bin/plot_prs.R" \
+    plot_prs.R \
         --summary "${summary}" \
         --phenotypes "${phenotypes}" \
         --roc-output "prs_roc.png" \

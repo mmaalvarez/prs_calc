@@ -48,11 +48,11 @@ workflow PRSCALC {
      * Merge all per-sample outputs after every sample has completed.
      */
     ch_summary_files = CALCULATE_PRS.out.results.map {
-        meta, summary, details -> summary
+        _meta, summary, _details -> summary
     }
 
     ch_detail_files = CALCULATE_PRS.out.results.map {
-        meta, summary, details -> details
+        _meta, _summary, details -> details
     }
 
     MERGE_PRS_REPORTS(

@@ -3,8 +3,7 @@ process PREPARE_SCOREFILE {
     tag "${scorefile.name}"
 
     label 'process_low'
-
-    conda "${projectDir}/envs/prs_calc.yml"
+    label 'prs_calc_env'
 
     input:
     path scorefile
@@ -16,7 +15,7 @@ process PREPARE_SCOREFILE {
 
     script:
     """
-    Rscript "${projectDir}/bin/prepare_scorefile.R" \
+    prepare_scorefile.R \
         --scorefile "${scorefile}" \
         --target-build "${target_build}" \
         --output "normalized_scorefile.tsv" \
