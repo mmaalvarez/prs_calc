@@ -254,12 +254,26 @@ get_reference_sequence <- function(
     )
 }
 
+normalise_allele <- function(x) {
+    x <- toupper(trimws(as.character(x)))
+
+    x[
+        is.na(x) |
+            x %in% c("", ".", "NA")
+    ] <- NA_character_
+
+    x
+}
+
 allele_is_reference <- function(
     allele,
     chromosome,
     position
 ) {
+    allele <- normalise_allele(allele)
+
     if (
+        length(allele) != 1L ||
         is.na(allele) ||
         !nzchar(allele) ||
         !grepl("^[ACGTN]+$", allele)
@@ -281,23 +295,44 @@ allele_is_reference <- function(
 }
 
 record_alleles <- function(ref, alt) {
-    ref <- toupper(as.character(ref))
+    ref <- normalise_allele(ref)
+    alt <- normalise_allele(alt)
 
     alternate_alleles <- character(0)
 
-    if (
-        !is.na(alt) &&
-        nzchar(alt) &&
-        alt != "."
-    ) {
-        alternate_alleles <- strsplit(
-            toupper(alt),
-            ",",
-            fixed = TRUE
-        )[[1]]
+    if (!is.na(alt)) {
+        alternate_alleles <- normalise_allele(
+            strsplit(
+                alt,
+                ",",
+                fixed = TRUE
+            )[[1]]
+        )
     }
 
     c(ref, alternate_alleles)
+}
+
+find_allele_index <- function(ref, alt, allele) {
+    allele <- normalise_allele(allele)
+
+    if (
+        length(allele) != 1L ||
+        is.na(allele)
+    ) {
+        return(NA_integer_)
+    }
+
+    alleles <- record_alleles(ref, alt)
+    index <- match(allele, alleles)
+
+    if (is.na(index)) {
+        return(NA_integer_)
+    }
+
+    # VCF genotype indices are zero-based:
+    # REF = 0, first ALT = 1, second ALT = 2, ...
+    as.integer(index - 1L)
 }
 
 fallback_genotype <- function(
@@ -419,8 +454,8 @@ vcf_sample_id <- vcf_sample_ids[[1]]
 scores <- scores %>%
     mutate(
         chrom = normalise_chromosome(chrom),
-        effect_allele = toupper(effect_allele),
-        other_allele = toupper(other_allele),
+        effect_allele = normalise_allele(effect_allele),
+        other_allele = normalise_allele(other_allele),
         key = paste(chrom, position, sep = ":")
     )
 
@@ -428,8 +463,8 @@ if (nrow(genotypes) > 0L) {
     genotypes <- genotypes %>%
         mutate(
             chrom = normalise_chromosome(chrom),
-            ref = toupper(ref),
-            alt = toupper(alt),
+            ref = normalise_allele(ref),
+            alt = normalise_allele(alt),
             key = paste(chrom, position, sep = ":")
         )
 
@@ -511,7 +546,9 @@ for (i in seq_len(nrow(scores))) {
     no_call <- FALSE
     non_model_call <- FALSE
     assumed_reference <- FALSE
-    allele_mismatch <- model_mismatch
+    allele_mismatch <- FALSE
+    effect_allele_index <- NA_integer_
+    other_allele_index <- NA_integer_
 
     if (record_found) {
         records <- genotypes[record_indices, ]
@@ -561,29 +598,53 @@ for (i in seq_len(nrow(scores))) {
         record_ambiguous <- length(best_records) > 1L
         selected_record <- records[best_records[[1]], ]
 
-        vcf_ref <- toupper(
+        vcf_ref <- normalise_allele(
             selected_record$ref[[1]]
         )
 
-        vcf_alt <- toupper(
+        vcf_alt <- normalise_allele(
             selected_record$alt[[1]]
         )
 
         genotype <- selected_record$genotype[[1]]
 
-        if (
-            !allele_is_reference(
-                vcf_ref,
-                chromosome,
-                position
-            )
-        ) {
-            allele_mismatch <- TRUE
-        }
-
         alleles <- record_alleles(
             vcf_ref,
             vcf_alt
+        )
+
+        effect_allele_index <- find_allele_index(
+            vcf_ref,
+            vcf_alt,
+            effect_allele
+        )
+
+        if (!is.na(other_allele)) {
+            other_allele_index <- find_allele_index(
+                vcf_ref,
+                vcf_alt,
+                other_allele
+            )
+        }
+
+        # The score alleles may appear in either VCF orientation:
+        #
+        #   REF=other,  ALT=effect
+        #   REF=effect, ALT=other
+        #
+        # The effect allele must occur in the VCF allele list. When an
+        # other allele is supplied, it must also occur and must be
+        # distinct from the effect allele.
+        allele_mismatch <- (
+            is.na(effect_allele_index) ||
+            (
+                !is.na(other_allele) &&
+                (
+                    is.na(other_allele_index) ||
+                    other_allele_index ==
+                        effect_allele_index
+                )
+            )
         )
 
         genotype_tokens <- if (
@@ -593,7 +654,7 @@ for (i in seq_len(nrow(scores))) {
             character(0)
         } else {
             strsplit(
-                genotype,
+                sub(":.*$", "", genotype),
                 "[/|]",
                 perl = TRUE
             )[[1]]
@@ -625,9 +686,21 @@ for (i in seq_len(nrow(scores))) {
                 collapse = "/"
             )
 
-            dosage <- sum(
-                called_alleles == effect_allele
-            )
+            # Count copies of the effect allele by its VCF allele
+            # index. This works whether the effect allele is REF,
+            # ALT, or one allele in a multiallelic record.
+            dosage <- if (
+                is.na(effect_allele_index)
+            ) {
+                NA_real_
+            } else {
+                as.numeric(
+                    sum(
+                        genotype_indices ==
+                            effect_allele_index
+                    )
+                )
+            }
 
             model_alleles <- unique(
                 na.omit(
@@ -726,20 +799,24 @@ write_tsv(
 
 if (
     strict_alleles &&
-    any(details$allele_mismatch)
+    any(
+        details$allele_mismatch,
+        na.rm = TRUE
+    )
 ) {
     bad_variants <- unique(
         details$variant_id[
-            details$allele_mismatch
+            details$allele_mismatch %in% TRUE
         ]
     )
 
     stopf(
         paste0(
-            "Allele/reference mismatch for sample '%s': %s. ",
-            "Check --target_build, the score position column, ",
-            "and the VCF genome build. To retain mismatched rows ",
-            "as QC results, use --strict_alleles false."
+            "Score/VCF allele mismatch for sample '%s': %s. ",
+            "Check --target_build, the score position and allele ",
+            "columns, and the VCF allele definitions. To retain ",
+            "mismatched rows as QC results, use ",
+            "--strict-alleles false."
         ),
         opt$sample_id,
         paste(head(bad_variants, 10L), collapse = ", ")
@@ -808,7 +885,8 @@ summary <- tibble(
         details$assumed_reference
     ),
     n_allele_mismatches = sum(
-        details$allele_mismatch
+        details$allele_mismatch,
+        na.rm = TRUE
     ),
     n_non_model_allele_calls = sum(
         details$non_model_allele_call
