@@ -277,11 +277,11 @@ workflow {
         ch_phenotypes
     )
 
-    workflow.onError {
+    workflow.onError = {
         log.error "Pipeline failed: ${workflow.errorMessage ?: 'No error message available'}"
     }
 
-    workflow.onComplete {
+    workflow.onComplete = {
         log.info """
                  Pipeline completed
                  ------------------
