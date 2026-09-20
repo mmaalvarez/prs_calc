@@ -12,7 +12,7 @@ miguel.m.alvarez3[--at--]gmail[--dot--]com
 set -euo pipefail
 
 unset R_HOME
-export NXF_HOME="$HOME/work/.nextflow"
+export NXF_HOME="$HOME/.nextflow"
 
 nextflow run mmaalvarez/prs_calc -r main -latest \
 	--input /path/to/samplesheet.tsv \
@@ -21,6 +21,13 @@ nextflow run mmaalvarez/prs_calc -r main -latest \
 	--target_build hg38 \
 	-profile conda \
 	-resume
+```
+
+To create the conda environment with the required packages, first run:
+```
+wget https://github.com/mmaalvarez/prs_calc/blob/main/envs/prs_calc.yml
+
+conda env create -f prs_calc.yml -n prs_calc
 ```
 
 For faster Conda environment creation, if mamba is installed:
