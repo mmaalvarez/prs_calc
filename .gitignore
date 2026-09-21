@@ -1,8 +1,11 @@
-.R*
-.nextflow*
 tests/prs_calc_toy
 tests/results
 tests/work
 tests/.nextflow*
+results/
+work/
+.nextflow*
+bin/*.Rhistory
 OLD/
 */OLD/
+*/*/OLD/
