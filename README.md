@@ -9,11 +9,6 @@ miguel.m.alvarez3[--at--]gmail[--dot--]com
 ```
 #!/usr/bin/env bash
 
-set -euo pipefail
-
-unset R_HOME
-export NXF_HOME="$HOME/.nextflow"
-
 nextflow run mmaalvarez/prs_calc -r main -latest \
 	--input /path/to/samplesheet.tsv \
 	--scorefile /path/to/PGSXXXXX_hg38.txt \
@@ -23,7 +18,7 @@ nextflow run mmaalvarez/prs_calc -r main -latest \
 	-resume
 ```
 
-To create the conda environment with the required packages, first run:
+If it doesn't automatically create the conda environment with the required packages, first run:
 ```
 wget https://github.com/mmaalvarez/prs_calc/blob/main/envs/prs_calc.yml
 
