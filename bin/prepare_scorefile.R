@@ -179,8 +179,46 @@ if ("other_allele" %in% names(score)) {
 
 if ("hm_inferOtherAllele" %in% names(score)) {
     inferred_other <- clean_allele(score$hm_inferOtherAllele)
-    fill_rows <- is.na(other_allele) & !is.na(inferred_other)
-    other_allele[fill_rows] <- inferred_other[fill_rows]
+
+    # PGS Catalog harmonized files can contain slash-separated candidate
+    # alleles at multiallelic SNV positions, for example "A/T" or
+    # "A/C/T". These are sets of possible other alleles, not one literal
+    # allele. The normalized schema has a scalar other_allele field, so
+    # only copy an inferred value when it contains exactly one allele.
+    # Ambiguous candidate sets remain NA rather than selecting an allele
+    # arbitrarily or duplicating the score row.
+    infer_rows <- which(
+        is.na(other_allele) & !is.na(inferred_other)
+    )
+
+    if (length(infer_rows) > 0L) {
+        valid_inferred <- grepl(
+            "^[ACGT](/[ACGT])*$",
+            inferred_other[infer_rows]
+        )
+
+        if (any(!valid_inferred)) {
+            bad_rows <- infer_rows[!valid_inferred]
+
+            stopf(
+                paste0(
+                    "Unsupported value(s) in 'hm_inferOtherAllele' ",
+                    "at row(s): %s. Expected a single A/C/G/T allele ",
+                    "or a slash-separated list of A/C/G/T alleles."
+                ),
+                paste(head(bad_rows, 20L), collapse = ", ")
+            )
+        }
+
+        single_inferred_rows <- infer_rows[
+            grepl(
+                "^[ACGT]$",
+                inferred_other[infer_rows]
+            )
+        ]
+
+        other_allele[single_inferred_rows] <- inferred_other[single_inferred_rows]
+    }
 }
 
 # This implementation intentionally supports single-nucleotide variants.

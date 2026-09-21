@@ -36,14 +36,6 @@ nextflow run "PWD/../main.nf" \
     -resume
 
 """
-Or use -profile mamba if appropriate.
-
-To create the conda environment with the required packages, first run:
-```
-wget https://github.com/mmaalvarez/prs_calc/blob/main/envs/prs_calc.yml
-
-conda env create -f prs_calc.yml -n prs_calc
-```
 
 Expected raw additive scores:
   sample1 case    score=6.1652982550894038 dosage=38 omitted=0
