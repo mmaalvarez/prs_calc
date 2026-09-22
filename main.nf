@@ -70,15 +70,56 @@ workflow {
     def requestedBuild = params.hg != null ? params.hg : params.target_build
     def targetBuild = normaliseBuild(requestedBuild)
 
-    def missingMode = params.missing_genotype
+    def gvcfMode = (params.gvcf_mode ?: 'auto')
         .toString()
         .trim()
         .toLowerCase()
 
-    if (!(missingMode in ['reference', 'zero', 'error'])) {
+    if (!(gvcfMode in ['auto', 'gvcf', 'plain'])) {
+        error(
+            "--gvcf_mode must be one of: auto, gvcf, plain. " +
+            "Received '${params.gvcf_mode}'."
+        )
+    }
+
+    def missingMode = params.missing_genotype == null
+        ? ''
+        : params.missing_genotype.toString().trim().toLowerCase()
+
+    if (missingMode && !(missingMode in ['reference', 'zero', 'error'])) {
         error(
             "--missing_genotype must be one of: reference, zero, error. " +
             "Received '${params.missing_genotype}'."
+        )
+    }
+
+    if (!missingMode && gvcfMode != 'gvcf') {
+        error(
+            """
+            Missing required parameter: --missing_genotype
+
+            A plain VCF/BCF does not distinguish "homozygous reference
+            here" from "this site was never assessed", so the strategy
+            for unobserved score variants must be stated explicitly:
+
+              --missing_genotype reference   assume homozygous for the
+                                             reference-genome base
+              --missing_genotype zero        assign dosage 0
+              --missing_genotype error       abort on any missing genotype
+
+            It is optional only with --gvcf_mode gvcf, where reference
+            blocks make the choice unnecessary. --gvcf_mode auto cannot
+            be resolved until the files are opened, so the parameter is
+            still required there.
+            """.stripIndent()
+        )
+    }
+
+    if (missingMode && gvcfMode == 'gvcf' && missingMode != 'error') {
+        log.warn(
+            "--missing_genotype ${missingMode} is ignored with " +
+            "--gvcf_mode gvcf: hom-ref blocks are honoured as observed " +
+            "evidence and uncovered positions are scored as dosage 0."
         )
     }
 
@@ -121,6 +162,8 @@ workflow {
     def inputSheetParent = inputSheet.parent ?: file(launchDir)
 
     log.info "Input file:      ${inputSheet}"
+    log.info "gVCF mode:       ${gvcfMode}"
+    log.info "Missing genotype:${missingMode ?: ' not set (gVCF mode)'}"
     log.info "Score file:      ${scoreFile}"
     log.info "Phenotypes:      ${phenotypeFile ?: 'not provided; ROC/OR plots disabled'}"
     log.info "Target build:    ${targetBuild}"

@@ -14,9 +14,20 @@ nextflow run mmaalvarez/prs_calc -r main -latest \
 	--scorefile /path/to/PGSXXXXX_hg38.txt \
 	--phenotypes /path/to/phenotypes.tsv \
 	--target_build hg38 \
+	--missing_genotype reference \
 	-profile conda \
 	-resume
 ```
+
+# WARNING
+`--missing_genotype` is a required parameter, because a plain VCF/BCF does not distinguish "homozygous reference" from "this site was never assessed", so the strategy for unobserved score variants must be stated explicitly:
+
+    --missing_genotype reference   assume homozygous for the reference-genome base
+    --missing_genotype zero        assign dosage 0 (recommended if unsure about whether the missing sites are truly homozygous reference or just not covered/uncalled)
+    --missing_genotype error       abort on any missing genotype
+
+It is optional only with `--gvcf_mode gvcf`, where reference blocks make the choice unnecessary. `--gvcf_mode auto` cannot be resolved until the files are opened, so the parameter is still required there.
+
 
 If it doesn't automatically create the conda environment with the required packages, first run:
 ```
@@ -66,6 +77,9 @@ rs112290073	5	1285917	A	G	0.3293037471426	0.01	TERT	35 SNP score	1.39	ENSEMBL	rs
 rs2736098	5	1293971	T	C	0.131028262406404	0.28	TERT	35 SNP score	1.14	ENSEMBL	rs2736098	5	1293971	
 ```
 The pipeline will take the effect sizes of the SNPs in this table, and as SNP ID the chromosome+position. If the flag --target_build is set to "hg38" there must be a column named 'chr_position_hg38', for "hg37" or "hg19" it would need a column "chr_position_hg37" or "chr_position_hg19".
+
+
+# WARNING: If at a palindromic SNPs (A/T or C/G) the input VCF has the strand flipped (+ --> -), the allele dosage for that SNP will be inverted.
 
 
 Providing a phenotype file is optional, but without it there will be no ROC and OR deciles plots generated. 
