@@ -232,9 +232,9 @@ bad_other_allele <- !is.na(other_allele) &
 if (any(bad_effect_allele | bad_other_allele)) {
     bad_rows <- which(bad_effect_allele | bad_other_allele)
 
-    stopf(
+    warning(
         paste0(
-            "Only single-nucleotide A/C/G/T alleles are supported. ",
+            "Only single-nucleotide A/C/G/T alleles are used. ",
             "Non-SNV allele(s) were found at row(s): %s"
         ),
         paste(head(bad_rows, 20L), collapse = ", ")

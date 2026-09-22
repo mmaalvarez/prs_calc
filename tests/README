@@ -32,12 +32,13 @@ nextflow run "PWD/../main.nf" \
     --scorefile "$PWD/prs_calc_toy/PGS000392_hg19.txt" \
     --phenotypes "$PWD/prs_calc_toy/phenotypes.tsv" \
     --target_build hg19 \
+    --missing_genotype reference \
     -profile conda \
     -resume
 
 """
 
-Expected raw additive scores:
+Expected raw additive scores (with --missing_genotype reference):
   sample1 case    score=6.1652982550894038 dosage=38 omitted=0
   sample2 case    score=5.6640279157457166 dosage=34 omitted=2
   sample3 control score=0.0000000000000000 dosage=0 omitted=0

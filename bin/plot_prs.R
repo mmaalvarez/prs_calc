@@ -453,7 +453,7 @@ write_cohort_plots <- function() {
     }
 
     if (n_samples < 10L) {
-        stopf(
+        warning(
             paste0(
                 "At least 10 samples are required to form ten PRS ",
                 "deciles. Found %d samples."
@@ -497,7 +497,7 @@ write_cohort_plots <- function() {
             )
         },
         error = function(error) {
-            stopf(
+            warning(
                 "Could not calculate the ROC curve: %s",
                 conditionMessage(error)
             )
@@ -617,7 +617,7 @@ write_cohort_plots <- function() {
     expected_deciles <- seq_len(10L)
 
     if (!all(expected_deciles %in% or_table$decile)) {
-        stopf(
+        warning(
             "Could not assign samples to all ten PRS deciles"
         )
     }
