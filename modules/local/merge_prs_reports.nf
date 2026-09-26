@@ -16,9 +16,9 @@ process MERGE_PRS_REPORTS {
     script:
     """
     merge_prs_reports.R \
-        --summary-dir "summaries" \
-        --details-dir "details" \
-        --summary-output "prs_scores.tsv" \
-        --details-output "prs_variant_details.tsv"
+        --summary_dir "summaries" \
+        --details_dir "details" \
+        --summary_output "prs_scores.tsv" \
+        --details_output "prs_variant_details.tsv"
     """
 }

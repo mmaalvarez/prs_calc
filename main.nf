@@ -86,41 +86,30 @@ workflow {
         ? ''
         : params.missing_genotype.toString().trim().toLowerCase()
 
-    if (missingMode && !(missingMode in ['reference', 'zero', 'error'])) {
+    if (!missingMode) {
+        error(
+            'Missing required parameter: --missing_genotype. ' +
+            'Provide reference, zero or error for both VCF and gVCF inputs.'
+        )
+    }
+
+    if (!(missingMode in ['reference', 'zero', 'error'])) {
         error(
             "--missing_genotype must be one of: reference, zero, error. " +
             "Received '${params.missing_genotype}'."
         )
     }
 
-    if (!missingMode && gvcfMode != 'gvcf') {
-        error(
-            """
-            Missing required parameter: --missing_genotype
+    def noCallsMode = params.no_calls == null
+        ? ''
+        : params.no_calls.toString().trim().toLowerCase()
 
-            A plain VCF/BCF does not distinguish "homozygous reference
-            here" from "this site was never assessed", so the strategy
-            for unobserved score variants must be stated explicitly:
-
-              --missing_genotype reference   assume homozygous for the
-                                             reference-genome base
-              --missing_genotype zero        assign dosage 0
-              --missing_genotype error       abort on any missing genotype
-
-            It is optional only with --gvcf_mode gvcf, where reference
-            blocks make the choice unnecessary. --gvcf_mode auto cannot
-            be resolved until the files are opened, so the parameter is
-            still required there.
-            """.stripIndent()
-        )
+    if (!noCallsMode) {
+        error 'Missing required parameter: --no_calls (zero or error)'
     }
 
-    if (missingMode && gvcfMode == 'gvcf' && missingMode != 'error') {
-        log.warn(
-            "--missing_genotype ${missingMode} is ignored with " +
-            "--gvcf_mode gvcf: hom-ref blocks are honoured as observed " +
-            "evidence and uncovered positions are scored as dosage 0."
-        )
+    if (!(noCallsMode in ['zero', 'error'])) {
+        error "--no_calls must be zero or error; received '${params.no_calls}'"
     }
 
     def strictAlleles = params.strict_alleles
@@ -128,8 +117,33 @@ workflow {
         .trim()
         .toLowerCase()
 
-    if (!(strictAlleles in ['true', 'false'])) {
-        error '--strict_alleles must be true or false'
+    if (strictAlleles != 'true') {
+        error '--strict_alleles must be true'
+    }
+
+    if (strictAlleles == 'false') {
+        error(
+            '--strict_alleles false is incompatible: ' +
+            'allele mismatches must abort rather than produce unscored/NA rows.'
+        )
+    }
+
+    if (params.min_covered_fraction != null) {
+        def rawCoverage = params.min_covered_fraction
+            .toString()
+            .trim()
+
+        def minCoverage
+
+        try {
+            minCoverage = new BigDecimal(rawCoverage)
+        } catch (NumberFormatException _ignored) {
+            error '--min_covered_fraction must be a number between 0 and 1'
+        }
+
+        if (minCoverage < 0 || minCoverage > 1) {
+            error '--min_covered_fraction must be between 0 and 1'
+        }
     }
 
     def defaultPloidy
@@ -164,6 +178,7 @@ workflow {
     log.info "Input file:      ${inputSheet}"
     log.info "gVCF mode:       ${gvcfMode}"
     log.info "Missing genotype:${missingMode ?: ' not set (gVCF mode)'}"
+    log.info "No-call policy:  ${noCallsMode}"
     log.info "Score file:      ${scoreFile}"
     log.info "Phenotypes:      ${phenotypeFile ?: 'not provided; ROC/OR plots disabled'}"
     log.info "Target build:    ${targetBuild}"
@@ -237,15 +252,15 @@ workflow {
             def vcf = file(resolvedPath.toString(), checkIfExists: true)
             def vcfName = vcf.name
 
-            if (!(vcfName ==~ /(?i).+(\.vcf|gvcf|\.bcf)(\.gz|\.bgz)?$/)) {
+            if (!(vcfName ==~ /(?i).+(\.vcf|\.gvcf|_gvcf|\.bcf)(\.gz|\.bgz)?$/)) {
                 error(
                     "Unsupported input file '${vcf}'. " +
-                    'Expected .vcf, .vcf.gz, .vcf.bgz, gvcf.gz, .bcf or .bcf.gz.'
+                    'Expected .vcf, .vcf.gz, .vcf.bgz, _gvcf.gz, .gvcf.gz, .bcf or .bcf.gz.'
                 )
             }
 
             def inferredId = vcfName.replaceFirst(
-                /(?i)\.(vcf|bcf)(\.gz|\.bgz)?$/,
+                /(?i)(\.gvcf|_gvcf|\.vcf|\.bcf)(\.gz|\.bgz)?$/,
                 ''
             )
 

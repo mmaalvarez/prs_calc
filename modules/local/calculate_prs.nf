@@ -20,13 +20,19 @@ process CALCULATE_PRS {
         .toString()
         .toLowerCase()
 
-    def missingMode = params.missing_genotype == null
-        ? ''
-        : params.missing_genotype.toString().trim().toLowerCase()
+    def missingMode = params.missing_genotype
+        .toString()
+        .trim()
+        .toLowerCase()
 
-    def missingArgument = missingMode
-        ? "--missing-genotype '${missingMode}'"
-        : ''
+    def noCallsMode = params.no_calls
+        .toString()
+        .trim()
+        .toLowerCase()
+
+    def minCoveredArgument = params.min_covered_fraction == null
+        ? ''
+        : "--min_covered_fraction '${params.min_covered_fraction}'"
 
     def defaultPloidy = params.default_ploidy as Integer
 
@@ -49,48 +55,83 @@ process CALCULATE_PRS {
 
     bcftools view -h "${vcf}" > vcf_header.txt
 
+
+    # Detect using the header and, when needed, ALL records. Checking
+    # only the first 100,000 records can miss later gVCF blocks.
     #
-    # Decide whether this input carries hom-ref (reference) blocks.
-    # GATK, DRAGEN and bcftools declare a symbolic non-ref ALT in the
-    # header. Starling/Strelka-style gVCFs do not, and instead emit
-    # ALT="." records carrying INFO/END, so fall back to inspecting the
-    # first records of the file.
+    # Operational definition:
+    #   gvcf    : symbolic non-ref marker, or ALT=. with INFO/END
+    #   plain   : no gVCF marker anywhere, but at least one concrete/
+    #             other non-placeholder ALT record
+    #   unknown : neither kind of evidence
     #
+    if grep -qE '^##ALT=<ID=(NON_REF|\\*)[,>]' vcf_header.txt; then
+        detected_format="gvcf"
+    else
+        detected_format=\$(
+            bcftools view -H "${vcf}" |
+                awk -F '\\t' '
+                    {
+                        n = split(\$5, alleles, ",")
+                        for (i = 1; i <= n; i++) {
+                            if (alleles[i] == "<NON_REF>" ||
+                                alleles[i] == "<*>") {
+                                has_gvcf = 1
+                            } else if (alleles[i] != ".") {
+                                has_plain = 1
+                            }
+                        }
+
+                        if (\$4 ~ /^[ACGTNacgtn]\$/ &&
+                            \$5 == "." &&
+                            \$8 ~ /(^|;)END=[0-9]+(;|\$)/) {
+                            has_gvcf = 1
+                        }
+                    }
+                    END {
+                        if (has_gvcf) print "gvcf"
+                        else if (has_plain) print "plain"
+                        else print "unknown"
+                    }
+                '
+        )
+    fi
+
     case "${gvcfMode}" in
-        gvcf)
-            is_gvcf="true"
-            ;;
-        plain)
-            is_gvcf="false"
-
-            if grep -qE '^##ALT=<ID=(NON_REF|\\*)[,>]' vcf_header.txt; then
-                echo "WARNING: --gvcf_mode plain requested, but ${vcf} declares a symbolic non-ref ALT." >&2
+        auto)
+            if [[ "\${detected_format}" == "unknown" ]]; then
+                echo "ERROR: Cannot determine whether ${vcf} is a plain VCF or gVCF. Specify the input format explicitly with --gvcf_mode plain or --gvcf_mode gvcf." >&2
+                exit 1
             fi
+            effective_format="\${detected_format}"
             ;;
-        *)
-            is_gvcf="false"
+        gvcf|plain)
+            if [[ "\${detected_format}" != "unknown" &&
+                  "\${detected_format}" != "${gvcfMode}" ]]; then
+                echo "ERROR: Specified input format (--gvcf_mode ${gvcfMode}) does not match the detected actual input format (\${detected_format}) for ${vcf}." >&2
+                exit 1
+            fi
 
-            if grep -qE '^##ALT=<ID=(NON_REF|\\*)[,>]' vcf_header.txt; then
-                is_gvcf="true"
-            elif grep -q '^##INFO=<ID=END,' vcf_header.txt; then
-                n_blocks=\$(
-                    { bcftools view -H "${vcf}" 2>/dev/null || true; } \
-                    | head -n 100000 \
-                    | awk -F '\\t' '
-                        (\$5 == "." || \$5 == "<NON_REF>" || \$5 == "<*>") &&
-                        \$8 ~ /(^|;)END=/ { n += 1 }
-                        END { print n + 0 }
-                    '
-                )
+            effective_format="${gvcfMode}"
 
-                if [[ "\${n_blocks:-0}" -gt 0 ]]; then
-                    is_gvcf="true"
-                fi
+            if [[ "\${detected_format}" == "unknown" ]]; then
+                echo "WARNING: The format of ${vcf} cannot be independently determined; trusting the explicit --gvcf_mode ${gvcfMode} declaration." >&2
             fi
             ;;
     esac
 
-    echo "INFO: ${vcf} treated as gVCF: \${is_gvcf}" >&2
+    is_gvcf="false"
+    if [[ "\${effective_format}" == "gvcf" ]]; then
+        is_gvcf="true"
+    fi
+
+    if [[ "\${is_gvcf}" == "true" &&
+          "${missingMode}" == "reference" ]]; then
+        echo "ERROR: --missing_genotype reference is allowed only for plain VCF input; ${vcf} is being treated as a gVCF." >&2
+        exit 1
+    fi
+
+    echo "INFO: ${vcf}: detected=\${detected_format}; effective=\${effective_format}" >&2
 
     make_vcf_targets.py \
         --scorefile "${scorefile}" \
@@ -111,7 +152,7 @@ process CALCULATE_PRS {
         > queried_genotypes.tsv
 
     #
-    # --targets-overlap 1 (record) is required so that a reference block
+    # --targets_overlap 1 (record) is required so that a reference block
     # starting before a score position is still retrieved.
     #
     if [[ -s targets.tsv ]]; then
@@ -129,15 +170,17 @@ process CALCULATE_PRS {
     calculate_prs.R \
         --scorefile "${scorefile}" \
         --genotypes "queried_genotypes.tsv" \
-        --sample-id "${meta.id}" \
-        --vcf-sample-file "vcf_samples.txt" \
-        --source-vcf "${vcf.name}" \
-        --input-is-gvcf "\${is_gvcf}" \
-        --gvcf-mode "${gvcfMode}" ${missingArgument} \
-        --target-build "${target_build}" \
-        --default-ploidy "${defaultPloidy}" \
-        --strict-alleles "${strictAlleles}" \
-        --output-summary "${meta.id}.prs.tsv" \
-        --output-details "${meta.id}.variants.tsv"
+        --sample_id "${meta.id}" \
+        --vcf_sample_file "vcf_samples.txt" \
+        --source_vcf "${vcf.name}" \
+        --input_is_gvcf "\${is_gvcf}" \
+        --gvcf_mode "${gvcfMode}" \
+        --missing_genotype "${missingMode}" \
+        --no_calls "${noCallsMode}" ${minCoveredArgument} \
+        --target_build "${target_build}" \
+        --default_ploidy "${defaultPloidy}" \
+        --strict_alleles "${strictAlleles}" \
+        --output_summary "${meta.id}.prs.tsv" \
+        --output_details "${meta.id}.variants.tsv"
     """
 }

@@ -82,35 +82,13 @@ def read_header_contigs(header_file):
     return contigs
 
 
-def select_vcf_contig(score_contig, vcf_contigs):
-    contig_set = set(vcf_contigs)
-
-    if score_contig == "MT":
-        preferred = ["MT", "M", "chrM", "chrMT"]
-    else:
-        preferred = [score_contig, f"chr{score_contig}"]
-
-    for candidate in preferred:
-        if candidate in contig_set:
-            return candidate
-
-    canonical_matches = [
+def select_vcf_contigs(score_contig, vcf_contigs):
+    """Return every declared VCF spelling of this score chromosome."""
+    return [
         contig
         for contig in vcf_contigs
         if canonical_contig(contig) == score_contig
     ]
-
-    if len(canonical_matches) == 1:
-        return canonical_matches[0]
-
-    if len(canonical_matches) > 1:
-        raise RuntimeError(
-            f"VCF contains multiple contigs corresponding to "
-            f"score chromosome '{score_contig}': "
-            + ", ".join(canonical_matches)
-        )
-
-    return None
 
 
 def main():
@@ -131,6 +109,33 @@ def main():
     score_positions = read_score_positions(args.scorefile)
     vcf_contigs = read_header_contigs(args.vcf_header)
 
+    primary_chromosomes = {
+        *(str(number) for number in range(1, 23)),
+        "X",
+        "Y",
+        "MT",
+    }
+
+    primary_contigs = [
+        contig
+        for contig in vcf_contigs
+        if canonical_contig(contig) in primary_chromosomes
+    ]
+
+    prefixed = [
+        contig.lower().startswith("chr")
+        for contig in primary_contigs
+    ]
+
+    if any(prefixed) and any(not value for value in prefixed):
+        print(
+            "WARNING: VCF header mixes primary chromosome names "
+            "with and without 'chr'. Both spellings will be queried "
+            "and conflicting records at equivalent positions will "
+            "be rejected.",
+            file=sys.stderr,
+        )
+
     contig_order = {
         contig: index
         for index, contig in enumerate(vcf_contigs)
@@ -140,7 +145,7 @@ def main():
     mapping_report = []
 
     for score_contig in sorted(score_positions):
-        vcf_contig = select_vcf_contig(
+        matched_contigs = select_vcf_contigs(
             score_contig,
             vcf_contigs,
         )
@@ -150,13 +155,13 @@ def main():
         mapping_report.append(
             {
                 "score_chrom": score_contig,
-                "vcf_chrom": vcf_contig or "",
+                "vcf_chrom": ",".join(matched_contigs),
                 "n_targets": n_targets,
-                "mapped": "TRUE" if vcf_contig else "FALSE",
+                "mapped": "TRUE" if matched_contigs else "FALSE",
             }
         )
 
-        if vcf_contig is None:
+        if not matched_contigs:
             print(
                 f"WARNING: score chromosome '{score_contig}' is not "
                 f"declared in the VCF header",
@@ -164,10 +169,11 @@ def main():
             )
             continue
 
-        for position in score_positions[score_contig]:
-            targets.append(
-                (vcf_contig, position, position)
-            )
+        for vcf_contig in matched_contigs:
+            for position in score_positions[score_contig]:
+                targets.append(
+                    (vcf_contig, position, position)
+                )
 
     if not targets:
         raise RuntimeError(
@@ -206,8 +212,9 @@ def main():
         writer.writerows(mapping_report)
 
     print(
-        f"Mapped {len(targets)} unique score position(s) "
-        f"to VCF contigs",
+        f"Wrote {len(targets)} VCF target interval(s) for "
+        f"{sum(len(values) for values in score_positions.values())} "
+        f"unique score position(s)",
         file=sys.stderr,
     )
 
