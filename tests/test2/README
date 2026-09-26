@@ -1,0 +1,10 @@
+gpt 6 sol	https://poe.com/chat/ak9fs8n3072ylmtt1p
+
+
+Data generator: make_prs_calc_toy.py
+
+Rather than inventing REF bases, this generator reads chr22:20,000,000–20,000,255 from the same BSgenome.Hsapiens.UCSC.hg38 package the scorer uses. It writes the real reference slice, a 12-SNP score, small indexed VCFs, pseudo-gVCFs whose blocks cover only that 256-bp interval, and samplesheets. The intentionally bad REF records are confined to clearly named negative-control files.
+
+Run it in an environment with Rscript, BSgenome.Hsapiens.UCSC.hg38, Python 3, and bcftools available
+
+hg38_chr22_chunk.fa is for inspection, not a replacement for the scorer's whole hg38 genome. sites.tsv records the actual reference base and coordinate of every chosen SNP. In a correct run, plain/clean.vcf.gz and gvcf/full.vcf.gz should not generate REF-versus-hg38 warnings.

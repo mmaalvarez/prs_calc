@@ -12,25 +12,25 @@ stopf <- function(...) {
 
 option_list <- list(
     make_option(
-        "--summary-dir",
+        "--summary_dir",
         dest = "summary_dir",
         type = "character",
         default = "summaries"
     ),
     make_option(
-        "--details-dir",
+        "--details_dir",
         dest = "details_dir",
         type = "character",
         default = "details"
     ),
     make_option(
-        "--summary-output",
+        "--summary_output",
         dest = "summary_output",
         type = "character",
         default = "prs_scores.tsv"
     ),
     make_option(
-        "--details-output",
+        "--details_output",
         dest = "details_output",
         type = "character",
         default = "prs_variant_details.tsv"
@@ -72,6 +72,10 @@ summary_tables <- lapply(
     function(filename) {
         table <- read_tsv(
             filename,
+            col_types = cols(.default = col_guess(),
+                             sample_id = col_character(),
+                             vcf_sample_id = col_character(),
+                             source_vcf = col_character()),
             show_col_types = FALSE,
             progress = FALSE
         )
@@ -116,6 +120,11 @@ detail_tables <- lapply(
     function(filename) {
         read_tsv(
             filename,
+            col_types = cols(.default = col_guess(),
+                             sample_id = col_character(),
+                             vcf_sample_id = col_character(),
+                             source_vcf = col_character(),
+                             variant_id = col_character()),
             show_col_types = FALSE,
             progress = FALSE
         )

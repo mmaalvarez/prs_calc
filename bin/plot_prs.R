@@ -47,23 +47,23 @@ option_list <- list(
         type = "character"
     ),
     make_option(
-        "--sample-id",
+        "--sample_id",
         dest = "sample_id",
         type = "character"
     ),
     make_option(
-        "--top-n",
+        "--top_n",
         dest = "top_n",
         type = "integer",
         default = 25L
     ),
     make_option(
-        "--contribution-output",
+        "--contribution_output",
         dest = "contribution_output",
         type = "character"
     ),
     make_option(
-        "--status-output",
+        "--status_output",
         dest = "status_output",
         type = "character"
     ),
@@ -78,13 +78,13 @@ option_list <- list(
         )
     ),
     make_option(
-        "--roc-output",
+        "--roc_output",
         dest = "roc_output",
         type = "character",
         default = NULL
     ),
     make_option(
-        "--or-output",
+        "--or_output",
         dest = "or_output",
         type = "character",
         default = NULL
@@ -454,11 +454,14 @@ write_cohort_plots <- function() {
 
     if (n_samples < 10L) {
         warning(
-            paste0(
-                "At least 10 samples are required to form ten PRS ",
-                "deciles. Found %d samples."
+            sprintf(
+                paste0(
+                    "At least 10 samples are required to form ten PRS ",
+                    "deciles. Found %d samples."
+                ),
+                n_samples
             ),
-            n_samples
+            call. = FALSE
         )
     }
 
@@ -497,7 +500,7 @@ write_cohort_plots <- function() {
             )
         },
         error = function(error) {
-            warning(
+            stopf(
                 "Could not calculate the ROC curve: %s",
                 conditionMessage(error)
             )
@@ -848,7 +851,7 @@ for (option_name in required_options) {
 top_n <- as.integer(opt$top_n)
 
 if (is.na(top_n) || top_n < 1L) {
-    stopf("--top-n must be a positive integer")
+    stopf("--top_n must be a positive integer")
 }
 
 summary_table <- read_tsv(

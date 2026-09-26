@@ -17,8 +17,8 @@ process PREPARE_SCOREFILE {
     """
     prepare_scorefile.R \
         --scorefile "${scorefile}" \
-        --target-build "${target_build}" \
+        --target_build "${target_build}" \
         --output "normalized_scorefile.tsv" \
-        --qc-output "scorefile_qc.tsv"
+        --qc_output "scorefile_qc.tsv"
     """
 }

@@ -17,7 +17,7 @@ option_list <- list(
         type = "character"
     ),
     make_option(
-        "--target-build",
+        "--target_build",
         dest = "target_build",
         type = "character"
     ),
@@ -28,7 +28,7 @@ option_list <- list(
         default = "normalized_scorefile.tsv"
     ),
     make_option(
-        "--qc-output",
+        "--qc_output",
         dest = "qc_output",
         type = "character",
         default = "scorefile_qc.tsv"
@@ -44,7 +44,7 @@ if (is.null(opt$scorefile) || !nzchar(opt$scorefile)) {
 }
 
 if (is.null(opt$target_build) || !nzchar(opt$target_build)) {
-    stopf("--target-build is required")
+    stopf("--target_build is required")
 }
 
 target_build <- tolower(trimws(opt$target_build))
@@ -64,6 +64,7 @@ score <- read_tsv(
     na = c("", "NA", "."),
     trim_ws = TRUE,
     name_repair = "check_unique",
+    col_types = cols(.default = col_character()),
     show_col_types = FALSE,
     progress = FALSE
 )
@@ -71,6 +72,9 @@ score <- read_tsv(
 if (nrow(score) == 0L) {
     stopf("The score file does not contain any variants")
 }
+
+n_input_rows <- nrow(score)
+original_score_rows <- seq_len(n_input_rows)
 
 required_columns <- c(
     "effect_allele",
@@ -111,7 +115,13 @@ normalise_chromosome <- function(x) {
 }
 
 clean_allele <- function(x) {
-    x <- toupper(trimws(as.character(x)))
+    x <- toupper(
+        gsub(
+            "[[:space:]]+",
+            "",
+            as.character(x)
+        )
+    )
     x[x %in% c("", ".", "NA")] <- NA_character_
     x
 }
@@ -125,6 +135,27 @@ if ("chr_name" %in% names(score)) {
 if ("hm_chr" %in% names(score)) {
     use_hm_chr <- is_missing_text(chromosome)
     chromosome[use_hm_chr] <- as.character(score$hm_chr[use_hm_chr])
+}
+
+present_chrom_rows <- which(!is_missing_text(chromosome))
+
+if (length(present_chrom_rows) > 0L) {
+    has_chr_prefix <- grepl(
+        "^chr",
+        chromosome[present_chrom_rows],
+        ignore.case = TRUE
+    )
+
+    if (any(has_chr_prefix) && any(!has_chr_prefix)) {
+        warning(
+            paste0(
+                "Score file mixes chromosome names with and without ",
+                "'chr'; equivalent names will be treated as the ",
+                "same chromosome."
+            ),
+            call. = FALSE
+        )
+    }
 }
 
 chromosome <- normalise_chromosome(chromosome)
@@ -177,16 +208,13 @@ if ("other_allele" %in% names(score)) {
     other_allele <- clean_allele(score$other_allele)
 }
 
+invalid_inferred_other <- rep(FALSE, n_input_rows)
+
 if ("hm_inferOtherAllele" %in% names(score)) {
     inferred_other <- clean_allele(score$hm_inferOtherAllele)
 
-    # PGS Catalog harmonized files can contain slash-separated candidate
-    # alleles at multiallelic SNV positions, for example "A/T" or
-    # "A/C/T". These are sets of possible other alleles, not one literal
-    # allele. The normalized schema has a scalar other_allele field, so
-    # only copy an inferred value when it contains exactly one allele.
-    # Ambiguous candidate sets remain NA rather than selecting an allele
-    # arbitrarily or duplicating the score row.
+# Under this policy a slash-separated inferred value is a set of
+    # allowed non-effect alleles, not one literal allele.
     infer_rows <- which(
         is.na(other_allele) & !is.na(inferred_other)
     )
@@ -197,59 +225,135 @@ if ("hm_inferOtherAllele" %in% names(score)) {
             inferred_other[infer_rows]
         )
 
-        if (any(!valid_inferred)) {
-            bad_rows <- infer_rows[!valid_inferred]
+        invalid_inferred_other[
+            infer_rows[!valid_inferred]
+        ] <- TRUE
 
-            stopf(
-                paste0(
-                    "Unsupported value(s) in 'hm_inferOtherAllele' ",
-                    "at row(s): %s. Expected a single A/C/G/T allele ",
-                    "or a slash-separated list of A/C/G/T alleles."
-                ),
-                paste(head(bad_rows, 20L), collapse = ", ")
-            )
-        }
-
-        single_inferred_rows <- infer_rows[
-            grepl(
-                "^[ACGT]$",
-                inferred_other[infer_rows]
-            )
+        other_allele[
+            infer_rows[valid_inferred]
+        ] <- inferred_other[
+            infer_rows[valid_inferred]
         ]
-
-        other_allele[single_inferred_rows] <- inferred_other[single_inferred_rows]
     }
 }
 
-# This implementation intentionally supports single-nucleotide variants.
-# Rejecting indels is safer than silently applying the wrong reference
-# allele to an absent indel.
+# Keep only single-base A/C/G/T score variants. The missing
+# other_allele allowed by this schema is not itself a non-SNV.
+bad_effect_allele <- !grepl(
+    "^[ACGT](/[ACGT])*$",
+    effect_allele
+)
 
-bad_effect_allele <- !grepl("^[ACGT]$", effect_allele)
 bad_other_allele <- !is.na(other_allele) &
-    !grepl("^[ACGT]$", other_allele)
+    !grepl(
+        "^[ACGT](/[ACGT])*$",
+        other_allele
+    )
 
-if (any(bad_effect_allele | bad_other_allele)) {
-    bad_rows <- which(bad_effect_allele | bad_other_allele)
+skip_non_snv <- bad_effect_allele |
+    bad_other_allele |
+    invalid_inferred_other
 
+skipped_non_snv_rows <- original_score_rows[skip_non_snv]
+n_skipped_non_snv <- length(skipped_non_snv_rows)
+
+if (n_skipped_non_snv > 0L) {
     warning(
-        paste0(
-            "Only single-nucleotide A/C/G/T alleles are used. ",
-            "Non-SNV allele(s) were found at row(s): %s"
+        sprintf(
+            paste0(
+                "Skipped %d non-SNV/unsupported-allele score row(s); ",
+                "first original row number(s): %s"
+            ),
+            n_skipped_non_snv,
+            paste(head(skipped_non_snv_rows, 20L), collapse = ", ")
         ),
-        paste(head(bad_rows, 20L), collapse = ", ")
+        call. = FALSE
     )
 }
 
-same_allele <- !is.na(other_allele) &
-    effect_allele == other_allele
+keep <- !skip_non_snv
 
-if (any(same_allele)) {
-    bad_rows <- which(same_allele)
-
+if (!any(keep)) {
     stopf(
-        "Effect and other allele are identical at row(s): %s",
-        paste(head(bad_rows, 20L), collapse = ", ")
+        "No SNV score variants remain after skipping %d unsupported row(s)",
+        n_skipped_non_snv
+    )
+}
+
+score <- score[keep, , drop = FALSE]
+chromosome <- chromosome[keep]
+position <- position[keep]
+effect_allele <- effect_allele[keep]
+other_allele <- other_allele[keep]
+original_score_rows <- original_score_rows[keep]
+
+normalise_allele_set <- function(value) {
+    if (is.na(value)) {
+        return(NA_character_)
+    }
+
+    paste(
+        sort(
+            unique(
+                strsplit(
+                    value,
+                    "/",
+                    fixed = TRUE
+                )[[1]]
+            )
+        ),
+        collapse = "/"
+    )
+}
+
+effect_allele <- vapply(
+    effect_allele,
+    normalise_allele_set,
+    character(1),
+    USE.NAMES = FALSE
+)
+
+other_allele <- vapply(
+    other_allele,
+    normalise_allele_set,
+    character(1),
+    USE.NAMES = FALSE
+)
+
+overlapping_alleles <- vapply(
+    seq_along(effect_allele),
+    function(i) {
+        if (is.na(other_allele[[i]])) {
+            return(FALSE)
+        }
+
+        effect_set <- strsplit(
+            effect_allele[[i]],
+            "/",
+            fixed = TRUE
+        )[[1]]
+
+        other_set <- strsplit(
+            other_allele[[i]],
+            "/",
+            fixed = TRUE
+        )[[1]]
+
+        length(intersect(effect_set, other_set)) > 0L
+    },
+    logical(1)
+)
+
+if (any(overlapping_alleles)) {
+    stopf(
+        "Effect and other allele sets overlap at original score row(s): %s",
+        paste(
+            head(
+                original_score_rows[overlapping_alleles],
+                20L
+            ),
+            collapse = ", "
+        )
     )
 }
 
@@ -301,7 +405,7 @@ fallback_id <- paste0(
 variant_id[is.na(variant_id)] <- fallback_id[is.na(variant_id)]
 
 normalized <- tibble(
-    score_row = seq_len(nrow(score)),
+    score_row = original_score_rows,
     variant_id = variant_id,
     chrom = chromosome,
     position = position,
@@ -322,8 +426,19 @@ qc <- tibble(
     source_scorefile = basename(opt$scorefile),
     target_build = target_build,
     position_column = position_column,
-    n_input_rows = nrow(score),
+    n_input_rows = n_input_rows,
     n_output_rows = nrow(normalized),
+    n_skipped_non_snv = n_skipped_non_snv,
+    skipped_non_snv_score_rows_first_20 = if (
+        n_skipped_non_snv > 0L
+    ) {
+        paste(
+            head(skipped_non_snv_rows, 20L),
+            collapse = ","
+        )
+    } else {
+        NA_character_
+    },
     n_unique_positions = length(unique(coordinate)),
     n_positions_with_multiple_score_rows = sum(
         coordinate_counts > 1L

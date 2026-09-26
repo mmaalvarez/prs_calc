@@ -1,11 +1,12 @@
-tests/prs_calc_toy
-tests/results
-tests/work
-tests/.nextflow*
+tests/test*/prs_calc_toy
+tests/test*/results
+tests/test*/work
+tests/test*/.nextflow*
 results/
 work/
 .nextflow*
 bin/*.Rhistory
+bin/__pycache__
 OLD/
 */OLD/
 */*/OLD/

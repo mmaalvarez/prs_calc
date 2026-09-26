@@ -21,10 +21,10 @@ process PLOT_PRS {
     plot_prs.R \
         --summary "${summary}" \
         --details "${details}" \
-        --sample-id "${meta.id}" \
-        --top-n "${topVariants}" \
-        --contribution-output "${meta.id}.contributions.png" \
-        --status-output "${meta.id}.variant_status.png"
+        --sample_id "${meta.id}" \
+        --top_n "${topVariants}" \
+        --contribution_output "${meta.id}.contributions.png" \
+        --status_output "${meta.id}.variant_status.png"
     """
 }
 
@@ -50,7 +50,7 @@ process PLOT_PRS_COHORT {
     plot_prs.R \
         --summary "${summary}" \
         --phenotypes "${phenotypes}" \
-        --roc-output "prs_roc.png" \
-        --or-output "prs_or_deciles.png"
+        --roc_output "prs_roc.png" \
+        --or_output "prs_or_deciles.png"
     """
 }
