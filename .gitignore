@@ -2,11 +2,16 @@ tests/test*/prs_calc_toy
 tests/test*/results
 tests/test*/work
 tests/test*/.nextflow*
+tests/test*/.nfs*
 results/
 work/
 .nextflow*
 bin/*.Rhistory
 bin/__pycache__
+bin/.nfs*
 OLD/
 */OLD/
 */*/OLD/
+.nfs*
+*.Rhistory
+__pycache__

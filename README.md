@@ -17,7 +17,7 @@ row's `effect_allele` set. The final result is a raw PRS; to standardize it,
 calculate the mean and standard deviation of raw PRSs in an appropriate 
 reference population, then use:
 
-Z_{\mathrm{PRS}}=\frac{\mathrm{PRS}_{\mathrm{raw}}-\mu_{\mathrm{reference}}} {\sigma_{\mathrm{reference}}}
+$$Z_{\mathrm{PRS}}=\frac{\mathrm{PRS}_{\mathrm{raw}}-\mu_{\mathrm{reference}}} {\sigma_{\mathrm{reference}}}$$
 
 
 ## Requirements and quick start
@@ -344,10 +344,12 @@ The default publishing mode is `copy`; it can be changed with
 - A concrete SNP whose REF allele in the VCF disagrees with the REF allele
   in the BSgenome because of **a simple REF/ALT swap is warned about, 
   not rejected**; e.g.
+  
   | BSgenome | VCF | Action |
   | --- | --- | --- |
   | C | REF=A, ALT=C | swap-compatible, continue and warn |
-  | G | REF=A, ALT=C | unresolved, abort|
+  | G | REF=A, ALT=C | unresolved, abort |
+
   Reference-only (i.e. with a symbolic ALT allele like `<NON_REF>`) hom-ref 
   blocks and no-call interval starts abort in such case. Resolve genome-build 
   and orientation warnings before interpreting a PRS, especially with 
