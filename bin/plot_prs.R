@@ -544,8 +544,7 @@ write_cohort_plots <- function() {
             colour = "grey55",
             linewidth = 0.7
         ) +
-        geom_step(
-            direction = "vh",
+        geom_path(
             colour = "#2166AC",
             linewidth = 1.2
         ) +

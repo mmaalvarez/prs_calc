@@ -2,7 +2,7 @@ process MERGE_PRS_REPORTS {
 
     tag 'all_samples'
     
-    label 'process_low'
+    label 'process_medium'
     label 'prs_calc_env'
 
     input:

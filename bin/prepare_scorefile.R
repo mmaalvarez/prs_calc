@@ -47,16 +47,49 @@ if (is.null(opt$target_build) || !nzchar(opt$target_build)) {
     stopf("--target_build is required")
 }
 
-target_build <- tolower(trimws(opt$target_build))
+target_build_input <- trimws(opt$target_build)
+target_build <- tolower(target_build_input)
 
-if (!target_build %in% c("hg38", "hg37", "hg19")) {
+if (!target_build %in% c(
+    "hg38", "grch38", "38",
+    "hg19", "19", "grch37", "hg37", "37"
+)) {
     stopf(
-        "Unsupported target build '%s'. Expected hg38, hg37 or hg19.",
-        target_build
+        paste0(
+            "Unsupported target build '%s'. Expected one of: ",
+            "- hg38 (valid aliases are 38 and GRCh38)",
+            "- hg19 (valid aliases are 19, GRCh37, and 37)."
+        ),
+        target_build_input
     )
 }
 
-position_column <- paste0("chr_position_", target_build)
+position_candidates <- if (
+    target_build %in% c("hg38", "grch38", "38")
+) {
+    paste0(
+        "chr_position_",
+        c("hg38", "GRCh38", "grch38", "38")
+    )
+} else {
+    paste0(
+        "chr_position_",
+        c("hg19", "19", "GRCh37", "grch37", "hg37", "37")
+    )
+}
+
+# Prefer the column matching the supplied build name when available.
+preferred_position_column <- paste0(
+    "chr_position_",
+    target_build_input
+)
+
+if (preferred_position_column %in% position_candidates) {
+    position_candidates <- c(
+        preferred_position_column,
+        setdiff(position_candidates, preferred_position_column)
+    )
+}
 
 score <- read_tsv(
     opt$scorefile,
@@ -75,6 +108,24 @@ if (nrow(score) == 0L) {
 
 n_input_rows <- nrow(score)
 original_score_rows <- seq_len(n_input_rows)
+
+matching_position_columns <- position_candidates[
+    position_candidates %in% names(score)
+]
+
+if (length(matching_position_columns) == 0L) {
+    stopf(
+        paste0(
+            "Score file has no position column for target build '%s'. ",
+            "Expected one of: %s. Available columns: %s"
+        ),
+        target_build_input,
+        paste(position_candidates, collapse = ", "),
+        paste(names(score), collapse = ", ")
+    )
+}
+
+position_column <- matching_position_columns[[1L]]
 
 required_columns <- c(
     "effect_allele",
@@ -126,6 +177,28 @@ clean_allele <- function(x) {
     x
 }
 
+if (all(c("chr_name", "hm_chr") %in% names(score))) {
+    both_present <- which(
+        !is_missing_text(score$chr_name) &
+            !is_missing_text(score$hm_chr)
+    )
+
+    disagreements <- both_present[
+        normalise_chromosome(score$chr_name[both_present]) !=
+            normalise_chromosome(score$hm_chr[both_present])
+    ]
+
+    if (length(disagreements) > 0L) {
+        stopf(
+            paste0(
+                "Conflicting 'chr_name' and 'hm_chr' at ",
+                "original score row(s): %s"
+            ),
+            paste(head(disagreements, 20L), collapse = ", ")
+        )
+    }
+}
+
 chromosome <- rep(NA_character_, nrow(score))
 
 if ("chr_name" %in% names(score)) {
@@ -167,6 +240,7 @@ bad_position <- (
     is.na(position_numeric) |
     !is.finite(position_numeric) |
     position_numeric < 1 |
+    position_numeric > .Machine$integer.max | # to not overflow R’s integer range
     abs(position_numeric - round(position_numeric)) > 0
 )
 
@@ -178,6 +252,53 @@ if (any(bad_position)) {
         position_column,
         paste(head(bad_rows, 20L), collapse = ", ")
     )
+}
+
+for (
+    alternative_column in setdiff(
+        matching_position_columns,
+        position_column
+    )
+) {
+    present <- which(
+        !is_missing_text(score[[alternative_column]])
+    )
+    if (length(present) == 0L) {
+        next
+    }
+
+    alternative <- suppressWarnings(
+        as.numeric(score[[alternative_column]][present])
+    )
+
+    invalid <- (
+        is.na(alternative) |
+        !is.finite(alternative) |
+        alternative < 1 |
+        alternative > .Machine$integer.max |
+        abs(alternative - round(alternative)) > 0
+    )
+
+    if (any(invalid)) {
+        stopf(
+            "Invalid position in alternative column '%s' at original score row(s): %s",
+            alternative_column,
+            paste(head(present[invalid], 20L), collapse = ", ")
+        )
+    }
+
+    disagreements <- present[
+        alternative != position_numeric[present]
+    ]
+
+    if (length(disagreements) > 0L) {
+        stopf(
+            "Conflicting position columns '%s' and '%s' at original score row(s): %s",
+            position_column,
+            alternative_column,
+            paste(head(disagreements, 20L), collapse = ", ")
+        )
+    }
 }
 
 position <- as.integer(round(position_numeric))
@@ -213,7 +334,7 @@ invalid_inferred_other <- rep(FALSE, n_input_rows)
 if ("hm_inferOtherAllele" %in% names(score)) {
     inferred_other <- clean_allele(score$hm_inferOtherAllele)
 
-# Under this policy a slash-separated inferred value is a set of
+    # Under this policy a slash-separated inferred value is a set of
     # allowed non-effect alleles, not one literal allele.
     infer_rows <- which(
         is.na(other_allele) & !is.na(inferred_other)
@@ -251,8 +372,7 @@ bad_other_allele <- !is.na(other_allele) &
     )
 
 skip_non_snv <- bad_effect_allele |
-    bad_other_allele |
-    invalid_inferred_other
+    bad_other_allele
 
 skipped_non_snv_rows <- original_score_rows[skip_non_snv]
 n_skipped_non_snv <- length(skipped_non_snv_rows)
@@ -277,6 +397,28 @@ if (!any(keep)) {
     stopf(
         "No SNV score variants remain after skipping %d unsupported row(s)",
         n_skipped_non_snv
+    )
+}
+
+ignored_inferred_other_rows <- original_score_rows[
+    keep & invalid_inferred_other
+]
+
+if (length(ignored_inferred_other_rows) > 0L) {
+    warning(
+        sprintf(
+            paste0(
+                "Ignored invalid hm_inferOtherAllele for %d retained ",
+                "score row(s); other_allele remains unknown. ",
+                "First original row number(s): %s"
+            ),
+            length(ignored_inferred_other_rows),
+            paste(
+                head(ignored_inferred_other_rows, 20L),
+                collapse = ", "
+            )
+        ),
+        call. = FALSE
     )
 }
 
@@ -445,7 +587,18 @@ qc <- tibble(
     ),
     n_missing_other_allele = sum(
         is.na(normalized$other_allele)
-    )
+    ),
+    n_invalid_inferred_other_ignored =
+        length(ignored_inferred_other_rows),
+    invalid_inferred_other_score_rows_first_20 =
+        if (length(ignored_inferred_other_rows) > 0L) {
+            paste(
+                head(ignored_inferred_other_rows, 20L),
+                collapse = ","
+            )
+        } else {
+            NA_character_
+        }
 )
 
 write_tsv(

@@ -175,22 +175,6 @@ def main():
                     (vcf_contig, position, position)
                 )
 
-    if not targets:
-        raise RuntimeError(
-            "None of the score chromosomes could be mapped to VCF contigs"
-        )
-
-    targets.sort(
-        key=lambda row: (
-            contig_order.get(row[0], len(contig_order)),
-            row[1],
-        )
-    )
-
-    with open(args.output, "w", encoding="utf-8") as handle:
-        for chrom, start, end in targets:
-            handle.write(f"{chrom}\t{start}\t{end}\n")
-
     with open(
         args.report,
         "w",
@@ -210,6 +194,36 @@ def main():
 
         writer.writeheader()
         writer.writerows(mapping_report)
+
+        unmapped = [
+            row["score_chrom"]
+            for row in mapping_report
+            if row["mapped"] == "FALSE"
+        ]
+
+        if unmapped:
+            raise RuntimeError(
+                "Score chromosome(s) absent from VCF ##contig declarations: "
+                + ", ".join(unmapped)
+                + ". Refusing to impute every score row on an unmapped "
+                  "chromosome."
+            )
+
+    if not targets:
+        raise RuntimeError(
+            "None of the score chromosomes could be mapped to VCF contigs"
+        )
+
+    targets.sort(
+        key=lambda row: (
+            contig_order.get(row[0], len(contig_order)),
+            row[1],
+        )
+    )
+
+    with open(args.output, "w", encoding="utf-8") as handle:
+        for chrom, start, end in targets:
+            handle.write(f"{chrom}\t{start}\t{end}\n")
 
     print(
         f"Wrote {len(targets)} VCF target interval(s) for "

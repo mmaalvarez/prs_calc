@@ -16,15 +16,17 @@ process PLOT_PRS {
 
     script:
     def topVariants = params.plot_top_variants as Integer
-
+    def q = { value -> "'" + value.toString().replace("'", "'\"'\"'") + "'"}
+    def contributionFile = "${meta.id}.contributions.png"
+    def statusFile = "${meta.id}.variant_status.png"
     """
     plot_prs.R \
-        --summary "${summary}" \
-        --details "${details}" \
-        --sample_id "${meta.id}" \
+        --summary ${q.call(summary)} \
+        --details ${q.call(details)} \
+        --sample_id ${q.call(meta.id)} \
         --top_n "${topVariants}" \
-        --contribution_output "${meta.id}.contributions.png" \
-        --status_output "${meta.id}.variant_status.png"
+        --contribution_output ${q.call(contributionFile)} \
+        --status_output ${q.call(statusFile)}
     """
 }
 
@@ -48,9 +50,9 @@ process PLOT_PRS_COHORT {
     script:
     """
     plot_prs.R \
-        --summary "${summary}" \
-        --phenotypes "${phenotypes}" \
-        --roc_output "prs_roc.png" \
-        --or_output "prs_or_deciles.png"
+        --summary cohort_prs_scores.tsv \
+        --phenotypes cohort_phenotypes.tsv \
+        --roc_output prs_roc.png \
+        --or_output prs_or_deciles.png
     """
 }

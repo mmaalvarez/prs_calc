@@ -153,6 +153,10 @@ if (length(missing_options) > 0L) {
     )
 }
 
+if (identical(opt$sample_id, "NA")) {
+    stopf("Literal pipeline sample ID 'NA' is reserved")
+}
+
 parse_boolean <- function(value, option_name) {
     value <- tolower(trimws(as.character(value)))
 
@@ -562,14 +566,23 @@ validate_snp_alleles <- function(
     alleles
 }
 
-# This recognises SNP records, ALT=. reference/no-call records, and
-# symbolic gVCF records. A concrete multi-base REF or ALT makes the
-# entire record unsuitable as an SNP genotype.
-is_snv_or_symbolic_record <- function(ref, alt) {
+
+# Only single-base A/C/G/T alleles and the two gVCF placeholders
+# are SNP-compatible. Bare * represents a spanning deletion;
+# other symbolic ALTs, such as <DEL>, are not SNP alleles.
+is_snv_or_symbolic_record <- function(ref, alt, position, end) {
     ref <- normalise_allele(ref)
     alt <- normalise_allele(alt)
 
     if (is.na(ref) || !grepl("^[ACGT]$", ref)) {
+        return(FALSE)
+    }
+
+    if (
+        !is.na(end) &&
+        end > position &&
+        !reference_only_alt(alt)
+    ) {
         return(FALSE)
     }
 
@@ -581,23 +594,10 @@ is_snv_or_symbolic_record <- function(ref, alt) {
 
     all(
         grepl("^[ACGT]$", parts) |
-            grepl("^<[^<>]+>$", parts) |
-            parts == "*"
+            parts %in% c("<NON_REF>", "<*>")
     )
 }
 
-# A partial GT such as 0/. is invalid.
-# Only a wholly missing GT is handled by --no_calls.
-genotype_has_missing <- function(gt) {
-    if (is.na(gt) || !nzchar(gt)) {
-        return(TRUE)
-    }
-
-    primary <- sub(":.*$", "", gt)
-    tokens <- strsplit(primary, "[/|]", perl = TRUE)[[1]]
-
-    length(tokens) == 0L || any(tokens == ".")
-}
 
 is_full_no_call <- function(gt) {
     if (is.na(gt) || !nzchar(gt)) {
@@ -606,11 +606,8 @@ is_full_no_call <- function(gt) {
 
     primary <- sub(":.*$", "", gt)
 
-    # Includes ./., .|., and wholly missing polyploid GTs.
-    grepl(
-        "^\\.([/|]\\.)+$",
-        primary
-    )
+    # ., ./., .|., and wholly missing polyploid GTs.
+    grepl("^\\.([/|]\\.)*$", primary)
 }
 
 check_nonoverlapping <- function(intervals, label) {
@@ -743,18 +740,42 @@ genotype_cols <- list(
 )
 
 if ("end" %in% genotype_header) {
-    genotype_cols$end <- col_integer()
+    genotype_cols$end <- col_character()
 }
 
 genotypes <- read_tsv(
     opt$genotypes,
-    na = c("", "NA", "."),
+    na = c("", "NA"),
     show_col_types = FALSE,
     progress = FALSE,
     col_types = do.call(cols, genotype_cols)
 )
 
-if (!"end" %in% names(genotypes)) {
+if ("end" %in% names(genotypes)) {
+    raw_end <- trimws(genotypes$end)
+    has_end <- !is.na(raw_end) & raw_end != "."
+
+    bad_end <- has_end & !grepl("^[0-9]+$", raw_end)
+    if (any(bad_end)) {
+        stopf(
+            "Invalid INFO/END at queried genotype row(s): %s",
+            paste(head(which(bad_end), 20L), collapse = ", ")
+        )
+    }
+
+    parsed_end <- suppressWarnings(as.numeric(raw_end[has_end]))
+    if (any(
+        !is.finite(parsed_end) |
+            parsed_end < 1 |
+            parsed_end > .Machine$integer.max
+    )) {
+        stopf("INFO/END is outside the supported integer range")
+    }
+
+    end_values <- rep(NA_integer_, nrow(genotypes))
+    end_values[has_end] <- as.integer(parsed_end)
+    genotypes$end <- end_values
+} else {
     genotypes$end <- NA_integer_
 }
 
@@ -797,6 +818,10 @@ if (length(vcf_sample_ids) != 1L) {
 
 vcf_sample_id <- vcf_sample_ids[[1]]
 
+if (identical(vcf_sample_id, "NA")) {
+    stopf("Literal VCF sample ID 'NA' is reserved")
+}
+
 scores <- scores %>%
     mutate(
         chrom = normalise_chromosome(chrom),
@@ -805,11 +830,15 @@ scores <- scores %>%
         key = paste(chrom, position, sep = ":")
     )
 
+non_snv_at_score <- rep(NA_integer_, nrow(scores))
+
 reference_blocks <- tibble(
     chrom = character(0),
     start = integer(0),
     end = integer(0),
     ref = character(0),
+    alt = character(0),
+    genotype = character(0),
     ploidy = integer(0)
 )
 
@@ -825,7 +854,6 @@ no_call_intervals <- tibble(
 block_index <- list()
 no_call_index <- list()
 genotype_index <- list()
-non_snv_index <- list()
 
 if (nrow(genotypes) > 0L) {
     genotypes <- genotypes %>%
@@ -839,6 +867,8 @@ if (nrow(genotypes) > 0L) {
                 is_snv_or_symbolic_record,
                 ref,
                 alt,
+                position,
+                end,
                 USE.NAMES = FALSE
             ),
             full_no_call = vapply(
@@ -847,6 +877,18 @@ if (nrow(genotypes) > 0L) {
                 logical(1)
             )
         )
+
+    bad_end_rows <- which(
+        !is.na(genotypes$end) &
+            genotypes$end < genotypes$position
+    )
+
+    if (length(bad_end_rows) > 0L) {
+        stopf(
+            "INFO/END precedes POS at queried genotype row(s): %s",
+            paste(head(bad_end_rows, 20L), collapse = ", ")
+        )
+    }
 
     n_ignored_non_snv <- sum(
         !genotypes$is_snv_compatible
@@ -858,10 +900,64 @@ if (nrow(genotypes) > 0L) {
             !genotypes$is_snv_compatible
         )
 
-        non_snv_index <- split(
-            non_snv_rows,
-            genotypes$key[non_snv_rows]
+        ref_width <- nchar(genotypes$ref[non_snv_rows])
+        ref_width[is.na(ref_width) | ref_width < 1L] <- 1L
+
+        vcf_end <- genotypes$end[non_snv_rows]
+        missing_end <- is.na(vcf_end)
+        vcf_end[missing_end] <-
+            genotypes$position[non_snv_rows][missing_end]
+
+        span_end <- pmax(
+            as.double(genotypes$position[non_snv_rows]) +
+                ref_width - 1,
+            as.double(vcf_end)
         )
+
+        if (
+            any(!is.finite(span_end)) ||
+            any(span_end > .Machine$integer.max)
+        ) {
+            stopf("Invalid or out-of-range non-SNV VCF record span")
+        }
+
+        non_snv_intervals <- tibble(
+            chrom = genotypes$chrom[non_snv_rows],
+            start = genotypes$position[non_snv_rows],
+            end = as.integer(span_end),
+            source_row = as.integer(non_snv_rows)
+        )
+
+        for (
+            chromosome in intersect(
+                unique(scores$chrom),
+                unique(non_snv_intervals$chrom)
+            )
+        ) {
+            score_rows <- which(scores$chrom == chromosome)
+            interval_rows <- which(
+                non_snv_intervals$chrom == chromosome
+            )
+
+            hits <- IRanges::findOverlaps(
+                IRanges::IRanges(
+                    start = scores$position[score_rows],
+                    width = 1L
+                ),
+                IRanges::IRanges(
+                    start = non_snv_intervals$start[interval_rows],
+                    end = non_snv_intervals$end[interval_rows]
+                ),
+                select = "first"
+            )
+
+            matched <- which(!is.na(hits))
+
+            non_snv_at_score[score_rows[matched]] <-
+                non_snv_intervals$source_row[
+                    interval_rows[hits[matched]]
+                ]
+        }
 
         warning(
             sprintf(
@@ -960,14 +1056,12 @@ if (nrow(genotypes) > 0L) {
             start = genotypes$position[block_rows],
             end = as.integer(block_end),
             ref = genotypes$ref[block_rows],
+            alt = genotypes$alt[block_rows],
+            genotype = genotypes$genotype[block_rows],
             ploidy = as.integer(block_ploidy)
         ) %>%
             distinct(
-                chrom,
-                start,
-                end,
-                ref,
-                ploidy,
+                chrom, start, end, ref, alt, genotype, ploidy,
                 .keep_all = TRUE
             ) %>%
             arrange(chrom, start, end)
@@ -1187,8 +1281,12 @@ if (nrow(genotypes) > 0L) {
     }
 }
 
-n_homozygous_reference_blocks <- nrow(reference_blocks)
-
+n_homozygous_reference_blocks <- sum(
+    reference_blocks$end > reference_blocks$start
+)
+n_hom_ref_site_records <- sum(
+    reference_blocks$end == reference_blocks$start
+)
 
 #
 # Blocks within a chromosome are sorted by start and, in a well-formed
@@ -1278,17 +1376,31 @@ resolve_missing <- function(
 ) {
     # A validated block is observed genotype evidence, not missingness.
     if (!is.na(block_row)) {
-        return(
-            fallback_genotype(
-                reason = paste0(reason, "_reference_block"),
-                variant_id = variant_id,
-                effect_is_reference = effect_is_reference,
-                model_mismatch = model_mismatch,
-                reference_base = reference_base,
-                policy = "reference",
-                ploidy = reference_blocks$ploidy[[block_row]]
-            )
+        is_spanning_block <- (
+            reference_blocks$end[[block_row]] >
+                reference_blocks$start[[block_row]]
         )
+
+        result <- fallback_genotype(
+            reason = "observed_hom_ref",
+            variant_id = variant_id,
+            effect_is_reference = effect_is_reference,
+            model_mismatch = model_mismatch,
+            reference_base = reference_base,
+            policy = "reference",
+            ploidy = reference_blocks$ploidy[[block_row]]
+        )
+
+        result$status <- if (is_spanning_block) {
+            "observed_hom_ref_block"
+        } else {
+            "observed_hom_ref_site"
+        }
+
+        # A VCF GT supplied this dosage. It was not an assumed
+        # reference genotype at an absent position.
+        result$dosage_from_reference <- FALSE
+        return(result)
     }
 
     if (input_is_gvcf && missing_mode == "error") {
@@ -1328,6 +1440,10 @@ for (i in seq_len(nrow(scores))) {
     other_allele <- score_row$other_allele[[1]]
     effect_weight <- score_row$effect_weight[[1]]
     key <- score_row$key[[1]]
+    partial_no_call <- FALSE
+    gt_known_alleles <- NA_integer_
+    gt_missing_alleles <- NA_integer_
+    vcf_ref_relation <- NA_character_
 
     if (
         is.na(other_allele) ||
@@ -1386,33 +1502,63 @@ for (i in seq_len(nrow(scores))) {
             !other_is_reference
     )
 
-    if (length(non_snv_index[[key]]) > 0L) {
+    non_snv_row <- non_snv_at_score[[i]]
+
+    if (!is.na(non_snv_row)) {
+        offending <- genotypes[non_snv_row, , drop = FALSE]
+
         stopf(
             paste0(
-                "Score SNP '%s' at %s:%d has a non-SNV VCF record ",
-                "at that position; it cannot be treated as an SNP ",
-                "no-call or as an absent site"
+                "Score SNP '%s' at %s:%d overlaps a non-SNV VCF ",
+                "record starting at %s:%d (REF=%s, ALT=%s, ",
+                "INFO/END=%s); it cannot be scored as a SNP or ",
+                "treated as absent"
             ),
             variant_id,
             chromosome,
-            position
+            position,
+            offending$chrom[[1]],
+            offending$position[[1]],
+            offending$ref[[1]],
+            ifelse(is.na(offending$alt[[1]]),
+                   ".", offending$alt[[1]]),
+            ifelse(is.na(offending$end[[1]]),
+                   ".", as.character(offending$end[[1]]))
         )
     }
 
     record_indices <- genotype_index[[key]]
 
     interval_row <- find_no_call_interval(
-        chromosome,
-        position
+        chromosome, position
     )
+    block_row <- find_reference_block(
+        chromosome, position
+    )
+
+    exact_hom_ref_record <- (
+        !is.na(block_row) &&
+        reference_blocks$start[[block_row]] == position
+    )
+
+    # An interval record synthesized for an interior position is
+    # evidence, but it is not a record beginning at that position.
+    vcf_record_at_position <- (
+        length(record_indices) > 0L ||
+        exact_hom_ref_record
+    )
+
+    no_call_interval_found <- !is.na(interval_row)
 
     if (
         length(record_indices) == 0L &&
-        !is.na(interval_row)
+        no_call_interval_found
     ) {
-        record_indices <- no_call_intervals$source_row[[interval_row]]
+        record_indices <-
+            no_call_intervals$source_row[[interval_row]]
     }
 
+    # Retain this internal variable for choosing the scoring branch.
     record_found <- length(record_indices) > 0L
 
     record_ambiguous <- FALSE
@@ -1428,14 +1574,18 @@ for (i in seq_len(nrow(scores))) {
     dosage_from_reference <- FALSE
     allele_mismatch <- FALSE
 
-    reference_block_found <- FALSE
+    reference_block_found <- (
+        !is.na(block_row) &&
+        reference_blocks$end[[block_row]] >
+            reference_blocks$start[[block_row]]
+    )
+    hom_ref_site_found <- (
+        !is.na(block_row) &&
+        reference_blocks$end[[block_row]] ==
+            reference_blocks$start[[block_row]]
+    )
     reference_block_text <- NA_character_
     reference_block_ref <- NA_character_
-
-    block_row <- find_reference_block(
-        chromosome,
-        position
-    )
 
     if (record_found && !is.na(block_row)) {
         stopf(
@@ -1497,6 +1647,46 @@ for (i in seq_len(nrow(scores))) {
             vcf_ref <- selected_record$ref[[1]]
             vcf_alt <- selected_record$alt[[1]]
         }
+
+        # An interior score position in a no-call interval has no VCF REF
+        # of its own; the interval's start REF was validated separately.
+        if (!is.na(vcf_ref)) {
+            if (vcf_ref == reference_base) {
+                vcf_ref_relation <- "reference_match"
+            } else {
+                vcf_alts <- record_alleles(
+                    vcf_ref,
+                    vcf_alt
+                )[-1L]
+
+                concrete_alts <- vcf_alts[
+                    !is.na(vcf_alts) &
+                        grepl("^[ACGT]$", vcf_alts)
+                ]
+
+                if (reference_base %in% concrete_alts) {
+                    vcf_ref_relation <- "swap_compatible"
+                } else {
+                    stopf(
+                        paste0(
+                            "Unresolved VCF/reference mismatch for sample ",
+                            "'%s', score row %d at %s:%d: BSgenome REF=%s, ",
+                            "VCF REF=%s, VCF ALT=%s. The BSgenome base is ",
+                            "absent from the concrete VCF alleles; this ",
+                            "cannot be explained by a REF/ALT swap."
+                        ),
+                        opt$sample_id,
+                        score_row$score_row[[1]],
+                        chromosome,
+                        position,
+                        reference_base,
+                        vcf_ref,
+                        ifelse(is.na(vcf_alt), ".", vcf_alt)
+                    )
+                }
+            }
+        }
+
         # For the INSIDE of a no-call interval, its start REF is not
         # the REF base at this scored position. Leave vcf_ref as NA.
 
@@ -1511,9 +1701,6 @@ for (i in seq_len(nrow(scores))) {
                 )
             }
 
-            # An interval's REF is at its start, not necessarily at
-            # this score position; only validate alleles when this
-            # record starts at the score position.
             if (!is.na(vcf_ref)) {
                 validate_snp_alleles(
                     vcf_ref,
@@ -1530,17 +1717,12 @@ for (i in seq_len(nrow(scores))) {
             dosage <- 0
             status <- "no_call_set_to_zero"
         } else {
-            if (genotype_has_missing(genotype)) {
+            if (is.na(genotype) || !nzchar(genotype)) {
                 stopf(
-                    paste0(
-                        "Score SNP '%s' at %s:%d has missing or ",
-                        "partially missing GT '%s'; only a full ",
-                        "GT=./. no-call is handled by --no_calls"
-                    ),
+                    "Score SNP '%s' at %s:%d has no usable GT field",
                     variant_id,
                     chromosome,
-                    position,
-                    ifelse(is.na(genotype), "NA", genotype)
+                    position
                 )
             }
 
@@ -1564,39 +1746,16 @@ for (i in seq_len(nrow(scores))) {
                 variant_id
             )
 
-            primary_gt <- sub(
-                ":.*$",
-                "",
-                genotype
-            )
+            primary_gt <- sub(":.*$", "", genotype)
 
+            # Accept numeric allele indexes and '.', in any ploidy.
+            # A wholly missing GT was handled above.
             valid_gt <- grepl(
-                "^[0-9]+([/|][0-9]+)*$",
+                "^(\\.|[0-9]+)([/|](\\.|[0-9]+))*$",
                 primary_gt
             )
 
-            genotype_indices <- if (valid_gt) {
-                suppressWarnings(
-                    as.integer(
-                        strsplit(
-                            primary_gt,
-                            "[/|]",
-                            perl = TRUE
-                        )[[1]]
-                    )
-                )
-            } else {
-                NA_integer_
-            }
-
-            callable <- (
-                valid_gt &&
-                    all(!is.na(genotype_indices)) &&
-                    all(genotype_indices >= 0L) &&
-                    all(genotype_indices < length(alleles))
-            )
-
-            if (!callable) {
+            if (!valid_gt) {
                 stopf(
                     "Invalid SNP genotype '%s' for variant '%s' at %s:%d",
                     genotype,
@@ -1606,17 +1765,62 @@ for (i in seq_len(nrow(scores))) {
                 )
             }
 
-            called_alleles <- alleles[
-                genotype_indices + 1L
-            ]
+            gt_tokens <- strsplit(
+                primary_gt,
+                "[/|]",
+                perl = TRUE
+            )[[1]]
+
+            missing_token <- gt_tokens == "."
+
+            if (all(missing_token)) {
+                stopf(
+                    "Internal error: full no-call GT '%s' was not recognised",
+                    genotype
+                )
+            }
+
+            partial_no_call <- any(missing_token)
+
+            if (partial_no_call && no_calls_mode == "error") {
+                stopf(
+                    paste0(
+                        "Score SNP '%s' at %s:%d has partially missing ",
+                        "GT=%s and --no_calls=error"
+                    ),
+                    variant_id,
+                    chromosome,
+                    position,
+                    genotype
+                )
+            }
+
+            # Only the called indexes are converted to alleles. Missing entries
+            # have no effect-allele dosage under --no_calls=zero.
+            known_indices <- suppressWarnings(
+                as.integer(gt_tokens[!missing_token])
+            )
+
+            if (
+                anyNA(known_indices) ||
+                any(known_indices < 0L) ||
+                any(known_indices >= length(alleles))
+            ) {
+                stopf(
+                    "Invalid SNP genotype '%s' for variant '%s' at %s:%d",
+                    genotype,
+                    variant_id,
+                    chromosome,
+                    position
+                )
+            }
+
+            called_alleles <- alleles[known_indices + 1L]
 
             if (
                 any(
                     is.na(called_alleles) |
-                        !grepl(
-                            "^[ACGT]$",
-                            called_alleles
-                        )
+                        !grepl("^[ACGT]$", called_alleles)
                 )
             ) {
                 stopf(
@@ -1631,25 +1835,28 @@ for (i in seq_len(nrow(scores))) {
                 )
             }
 
+            displayed_alleles <- rep(".", length(gt_tokens))
+            displayed_alleles[!missing_token] <- called_alleles
             called_alleles_text <- paste(
-                called_alleles,
+                displayed_alleles,
                 collapse = "/"
             )
 
+            gt_known_alleles <- length(known_indices)
+            gt_missing_alleles <- sum(missing_token)
+
             non_model_call <- (
                 length(other_set) == 0L &&
-                    any(
-                        !(called_alleles %in% effect_set)
-                    )
+                    any(!(called_alleles %in% effect_set))
             )
 
             dosage <- as.numeric(
-                sum(
-                    called_alleles %in% effect_set
-                )
+                sum(called_alleles %in% effect_set)
             )
 
-            status <- if (non_model_call) {
+            status <- if (partial_no_call) {
+                "partial_no_call_counted_known_alleles"
+            } else if (non_model_call) {
                 "observed_nonmodel_allele"
             } else {
                 "observed"
@@ -1671,15 +1878,32 @@ for (i in seq_len(nrow(scores))) {
             fallback$dosage_from_reference
 
         block_details <- describe_reference_block(
-            block_row,
-            position
+            block_row, position
         )
 
-        reference_block_found <- block_details$found
-        reference_block_text <- block_details$text
-        reference_block_ref <- block_details$ref
-    }
+        if (reference_block_found) {
+            reference_block_text <- block_details$text
+            reference_block_ref <- block_details$ref
+        }
 
+        if (!is.na(block_row)) {
+            genotype <- reference_blocks$genotype[[block_row]]
+            gt_known_alleles <-
+                reference_blocks$ploidy[[block_row]]
+            gt_missing_alleles <- 0L
+            called_alleles_text <- paste(
+                rep(reference_base, gt_known_alleles),
+                collapse = "/"
+            )
+
+            if (exact_hom_ref_record) {
+                vcf_ref <- reference_blocks$ref[[block_row]]
+                vcf_alt <- reference_blocks$alt[[block_row]]
+                vcf_ref_relation <- "reference_match"
+            }
+        }
+    }
+    
     if (!is.na(dosage)) {
         contribution <- effect_weight * dosage
     }
@@ -1701,21 +1925,24 @@ for (i in seq_len(nrow(scores))) {
             effect_is_reference,
         other_allele_is_reference =
             other_is_reference,
-        vcf_record_found = record_found,
-        vcf_record_ambiguous = record_ambiguous,
-        reference_block_found =
-            reference_block_found,
+        vcf_record_found = vcf_record_at_position,
+        reference_block_found = reference_block_found,
         reference_block = reference_block_text,
         reference_block_ref = reference_block_ref,
+        hom_ref_site_found = hom_ref_site_found,
+        no_call_interval_found = no_call_interval_found,
         vcf_ref = vcf_ref,
         vcf_alt = vcf_alt,
         genotype = genotype,
         called_alleles = called_alleles_text,
         vcf_no_call = no_call,
+        vcf_partial_no_call = partial_no_call,
+        gt_known_alleles = gt_known_alleles,
+        gt_missing_alleles = gt_missing_alleles,
+        vcf_ref_relation = vcf_ref_relation,
         non_model_allele_call = non_model_call,
         dosage_from_reference =
             dosage_from_reference,
-        allele_mismatch = allele_mismatch,
         effect_allele_dosage = dosage,
         contribution = contribution,
         status = status
@@ -1761,21 +1988,39 @@ if (n_reference_lookup_failed != 0L) {
 
 n_vcf_records_found <- sum(details$vcf_record_found)
 
-n_positions_from_reference_block <- sum(details$reference_block_found)
+n_positions_from_reference_block <- sum(
+    details$reference_block_found
+)
+
+n_positions_from_hom_ref_site <- sum(
+    details$hom_ref_site_found
+)
 
 n_uncovered_positions <- sum(
     !details$vcf_record_found &
-        !details$reference_block_found
+        !details$reference_block_found &
+        !details$no_call_interval_found
 )
 
-n_assumed_reference <- sum(
-    details$dosage_from_reference &
-        !details$reference_block_found
+n_assumed_reference <- sum(details$dosage_from_reference)
+
+
+usable_hom_ref_evidence <- details$status %in% c(
+    "observed_hom_ref_block",
+    "observed_hom_ref_site"
 )
 
-usable_observed_call <- details$status %in% c(
-    "observed",
-    "observed_nonmodel_allele"
+# An exact hom-ref record is also an observed GT at that position;
+# a block covering only an interior position is not an exact record.
+usable_observed_call <- (
+    details$status %in% c(
+        "observed",
+        "observed_nonmodel_allele"
+    ) |
+    (
+        usable_hom_ref_evidence &
+            details$vcf_record_found
+    )
 )
 
 usable_reference_block <- (
@@ -1786,7 +2031,7 @@ usable_reference_block <- (
 
 usable_coverage <- (
     usable_observed_call |
-        usable_reference_block
+        usable_hom_ref_evidence
 )
 
 n_unusable_positions <- sum(!usable_coverage)
@@ -1795,11 +2040,49 @@ covered_fraction <- mean(
     usable_coverage
 )
 
+partial_rows <- which(details$vcf_partial_no_call)
+n_vcf_partial_no_calls <- length(partial_rows)
+
+n_known_alleles_in_partial_calls <- sum(
+    details$gt_known_alleles[partial_rows]
+)
+
+n_missing_alleles_in_partial_calls <- sum(
+    details$gt_missing_alleles[partial_rows]
+)
+
+partial_no_call_warning <- if (n_vcf_partial_no_calls > 0L) {
+    sprintf(
+        paste0(
+            "Sample '%s': --no_calls=zero partially scored %d score ",
+            "row(s) (first score_row IDs: %s). Only known genotype ",
+            "alleles were used to count effect copies (%d known ",
+            "copy/copies); %d missing copy/copies contributed zero. ",
+            "These SNP contributions are incomplete and are excluded ",
+            "from covered_fraction."
+        ),
+        opt$sample_id,
+        n_vcf_partial_no_calls,
+        paste(
+            head(details$score_row[partial_rows], 20L),
+            collapse = ","
+        ),
+        n_known_alleles_in_partial_calls,
+        n_missing_alleles_in_partial_calls
+    )
+} else {
+    NA_character_
+}
+
+if (!is.na(partial_no_call_warning)) {
+    warning(partial_no_call_warning, call. = FALSE)
+}
+
 
 #
 # gVCF declaration versus what the records actually look like. Advisory
 # only: a gVCF whose blocks all happen to miss the score positions is
-# legal, as is a plain all-sites VCF that carries hom-ref blocks.
+# legal; 'plain' mode is rejected if hom-ref blocks are detected.
 #
 if (
     input_is_gvcf &&
@@ -1841,128 +2124,118 @@ if (!input_is_gvcf && n_positions_from_reference_block > 0L) {
     )
 }
 
-#
-# Reference orientation check. Dosage for called genotypes is counted by
-# allele index and is therefore unaffected by a REF/ALT swap, but the
-# 'reference' fallback compares the effect allele against the reference
-# genome, so a non-reference-oriented VCF makes assumed genotypes
-# unreliable.
-#
-n_vcf_ref_not_genome_ref <- sum(
-    details$vcf_record_found &
-        !is.na(details$vcf_ref) &
-        !is.na(details$reference_allele) &
-        substr(details$vcf_ref, 1L, 1L) !=
-            details$reference_allele,
+# Successful rows with a VCF REF/BSgenome disagreement have already
+# been checked: the BSgenome base must occur among concrete VCF ALTs.
+n_vcf_ref_swap_compatible <- sum(
+    details$vcf_ref_relation == "swap_compatible",
     na.rm = TRUE
 )
 
-n_palindromic_not_oriented <- sum(
-    details$vcf_record_found &
-        !is.na(details$vcf_ref) &
-        !is.na(details$reference_allele) &
-        substr(details$vcf_ref, 1L, 1L) != details$reference_allele &
-        paste0(details$effect_allele, details$other_allele) %in%
-            c("AT", "TA", "CG", "GC"),
+# Retain the existing QC column for compatibility. On successful
+# samples it equals the swap-compatible count: unresolved cases abort.
+n_vcf_ref_not_genome_ref <- n_vcf_ref_swap_compatible
+
+# Only call a score row biallelic-palindromic when each score allele
+# is one base. Slash-separated sets require separate consideration.
+palindromic_biallelic <- (
+    (details$effect_allele == "A" &
+         details$other_allele == "T") |
+    (details$effect_allele == "T" &
+         details$other_allele == "A") |
+    (details$effect_allele == "C" &
+         details$other_allele == "G") |
+    (details$effect_allele == "G" &
+         details$other_allele == "C")
+)
+
+n_palindromic_biallelic <- sum(
+    palindromic_biallelic,
     na.rm = TRUE
 )
 
-palindromic_note <- if (n_palindromic_not_oriented > 0L) {
-    sprintf(
-        paste0(
-            " %d of them are palindromic (A/T or C/G), where a swap ",
-            "cannot be distinguished from a strand flip, so those ",
-            "dosages may be inverted."
-        ),
-        n_palindromic_not_oriented
-    )
-} else {
-    paste0(
-        " None are palindromic, so all are distinguishable REF/ALT ",
-        "swaps and called dosages are correct."
-    )
-}
+n_palindromic_swap_compatible <- sum(
+    details$vcf_ref_relation == "swap_compatible" &
+        palindromic_biallelic,
+    na.rm = TRUE
+)
 
-if (n_vcf_ref_not_genome_ref > 0L) {
+if (n_vcf_ref_swap_compatible > 0L) {
     orientation_message <- sprintf(
         paste0(
-            "Sample '%s': %d of %d VCF records have a REF allele that ",
-            "disagrees with the %s reference base."
+            "Sample '%s': %d score row(s) have VCF REF differing ",
+            "from the %s BSgenome base, but that base occurs among ",
+            "their concrete VCF ALTs (swap-compatible, not proof ",
+            "of correct build or strand)."
         ),
         opt$sample_id,
-        n_vcf_ref_not_genome_ref,
-        n_vcf_records_found,
+        n_vcf_ref_swap_compatible,
         target_build
     )
 
-    orientation_message <- if (input_is_gvcf) {
-        paste0(
+    if (input_is_gvcf) {
+        orientation_message <- paste(
             orientation_message,
-            " A gVCF's REF fields come from the FASTA it was called ",
-            "against, so this indicates the wrong --target_build ",
-            "rather than a REF/ALT swap, and all dosages are suspect."
+            "A gVCF REF disagreement is unexpected: investigate",
+            "the calling FASTA, target build and coordinates."
         )
-    } else if (
+    }
+
+    if (
         missing_mode == "reference" &&
         n_assumed_reference > 0L
     ) {
-        paste0(
+        orientation_message <- paste(
             orientation_message,
             sprintf(
                 paste0(
-                    " This VCF is not reference-oriented, and %d ",
-                    "variant(s) were assumed homozygous reference, so ",
-                    "those dosages are unreliable. Consider ",
-                    "--missing_genotype=zero, or re-orient the VCF ",
-                    "with 'bcftools norm --check_ref s'."
+                    "%d other score row(s) used assumed reference ",
+                    "genotypes; those assumptions may be unreliable ",
+                    "until reference orientation is resolved."
                 ),
                 n_assumed_reference
-            ),
-            palindromic_note
+            )
         )
-    } else {
-        paste0(
+    }
+
+    if (n_palindromic_swap_compatible > 0L) {
+        orientation_message <- paste(
             orientation_message,
-            " This VCF is not reference-oriented. Called genotypes are ",
-            "scored by allele index, so simple REF/ALT swaps are ",
-            "handled correctly.",
-            palindromic_note
+            sprintf(
+                paste0(
+                    "%d swap-compatible row(s) are biallelic A/T ",
+                    "or C/G; their strand cannot be established ",
+                    "from these allele labels alone."
+                ),
+                n_palindromic_swap_compatible
+            )
         )
     }
 
     warning(orientation_message, call. = FALSE)
 }
 
-
-# Neither model allele matching the reference strand at a biallelic
-# non-palindromic site means the score file and the VCF are both
-# flipped relative to the genome. Called genotypes still score
-# correctly, but the same file's palindromic sites will be flipped too
-# and there no detector exists.
-#
-n_model_strand_mismatch <- sum(
-    details$vcf_record_found &
-        !details$allele_mismatch &
-        !is.na(details$other_allele) &
-        !is.na(details$reference_allele) &
+# This identifies a model/reference disagreement. It does NOT
+# establish that the score and VCF have been jointly strand-flipped.
+n_model_ref_allele_discrepancies <- sum(
+    !is.na(details$other_allele) &
         !details$effect_allele_is_reference &
         !details$other_allele_is_reference,
     na.rm = TRUE
 )
 
-if (n_model_strand_mismatch > 0L) {
+if (n_model_ref_allele_discrepancies > 0L) {
     warning(
         sprintf(
             paste0(
-                "Sample '%s': %d variant(s) have neither model allele ",
-                "matching the %s reference base, which is the ",
-                "signature of a score file and VCF that are jointly ",
-                "strand-flipped. Called genotypes still score ",
-                "correctly, but palindromic sites in the same file ",
-                "cannot be checked and may be inverted."
+                "Sample '%s': %d score row(s) specify neither ",
+                "score allele set as the %s BSgenome reference ",
+                "base. This is an unresolved score/reference ",
+                "discrepancy, not proof of a strand flip or of ",
+                "correct called dosages. Verify build, position ",
+                "and allele harmonization."
             ),
             opt$sample_id,
-            n_model_strand_mismatch,
+            n_model_ref_allele_discrepancies,
             target_build
         ),
         call. = FALSE
@@ -1992,17 +2265,17 @@ summary <- tibble(
     n_vcf_records_found = n_vcf_records_found,
     n_absent_from_vcf = sum(!details$vcf_record_found),
     n_vcf_no_calls = sum(details$vcf_no_call),
+    n_vcf_partial_no_calls = n_vcf_partial_no_calls,
+    n_known_alleles_in_partial_calls = n_known_alleles_in_partial_calls,
+    n_missing_alleles_in_partial_calls = n_missing_alleles_in_partial_calls,
+    partial_no_call_warning = partial_no_call_warning,
     n_dosage_from_reference = n_assumed_reference,
-    n_allele_mismatches = sum(
-        details$allele_mismatch,
-        na.rm = TRUE
-    ),
-    n_non_model_allele_calls = sum(
-        details$non_model_allele_call
-    ),
+    n_non_model_allele_calls = sum(details$non_model_allele_call),
     n_vcf_ref_not_genome_ref = n_vcf_ref_not_genome_ref,
-    n_model_strand_mismatch = n_model_strand_mismatch,
-    n_palindromic_not_oriented = n_palindromic_not_oriented,
+    n_vcf_ref_swap_compatible = n_vcf_ref_swap_compatible,
+    n_model_ref_allele_discrepancies = n_model_ref_allele_discrepancies,
+    n_palindromic_biallelic = n_palindromic_biallelic,
+    n_palindromic_swap_compatible = n_palindromic_swap_compatible,
     n_block_ref_not_genome_ref = n_block_ref_not_genome_ref,
     input_is_gvcf = input_is_gvcf,
     gvcf_mode_declared = gvcf_mode_declared,
@@ -2012,6 +2285,8 @@ summary <- tibble(
     min_covered_fraction = min_covered_fraction,
     n_homozygous_reference_blocks = n_homozygous_reference_blocks,
     n_positions_from_reference_block = n_positions_from_reference_block,
+    n_hom_ref_site_records = n_hom_ref_site_records,
+    n_positions_from_hom_ref_site = n_positions_from_hom_ref_site,
     n_reference_lookup_failed = n_reference_lookup_failed,
     n_uncovered_positions = n_uncovered_positions,
     n_unusable_positions = n_unusable_positions,

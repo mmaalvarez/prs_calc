@@ -75,7 +75,16 @@ summary_tables <- lapply(
             col_types = cols(.default = col_guess(),
                              sample_id = col_character(),
                              vcf_sample_id = col_character(),
-                             source_vcf = col_character()),
+                             source_vcf = col_character(),
+                             variant_id = col_character(),
+                             chrom = col_character(),
+                             genotype = col_character(),
+                             effect_allele = col_character(),
+                             other_allele = col_character(),
+                             vcf_ref = col_character(),
+                             vcf_alt = col_character(),
+                             called_alleles = col_character()
+                        ),
             show_col_types = FALSE,
             progress = FALSE
         )
@@ -124,7 +133,15 @@ detail_tables <- lapply(
                              sample_id = col_character(),
                              vcf_sample_id = col_character(),
                              source_vcf = col_character(),
-                             variant_id = col_character()),
+                             variant_id = col_character(),
+                             chrom = col_character(),
+                             genotype = col_character(),
+                             effect_allele = col_character(),
+                             other_allele = col_character(),
+                             vcf_ref = col_character(),
+                             vcf_alt = col_character(),
+                             called_alleles = col_character()
+                        ),
             show_col_types = FALSE,
             progress = FALSE
         )
