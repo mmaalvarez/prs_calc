@@ -6,34 +6,27 @@ include { PRSCALC } from './workflows/prs_calc'
 
 
 def normaliseBuild(def rawBuild) {
-    if (rawBuild == null) {
+    def build = rawBuild?.toString()?.trim()?.toLowerCase()
+
+    if (!build) {
         throw new IllegalArgumentException(
             'A target genome build must be provided with --target_build'
         )
     }
 
-    def build = rawBuild
-        .toString()
-        .trim()
-        .toLowerCase()
-        .replaceFirst(/^grch/, '')
-        .replaceFirst(/^hg/, '')
-
-    if (build == '38') {
+    if (build in ['grch38', 'hg38', '38']) {
         return 'hg38'
     }
 
-    if (build == '37') {
-        return 'hg37'
-    }
-
-    if (build == '19') {
+    if (build in ['hg19', '19', 'grch37', 'hg37', '37']) {
         return 'hg19'
     }
 
     throw new IllegalArgumentException(
         "Unsupported target build '${rawBuild}'. " +
-        'Supported values are hg38, hg37, hg19, 38, 37 and 19.'
+        'Supported builds are: ' +
+        '- hg38 (valid aliases are 38 and GRCh38)' +
+        '- hg19 (valid aliases are 19, GRCh37, and 37)'
     )
 }
 
@@ -117,15 +110,15 @@ workflow {
         .trim()
         .toLowerCase()
 
-    if (strictAlleles != 'true') {
-        error '--strict_alleles must be true'
-    }
-
     if (strictAlleles == 'false') {
         error(
             '--strict_alleles false is incompatible: ' +
             'allele mismatches must abort rather than produce unscored/NA rows.'
         )
+    }
+
+    if (strictAlleles != 'true') {
+        error '--strict_alleles must be true'
     }
 
     if (params.min_covered_fraction != null) {
@@ -177,7 +170,7 @@ workflow {
 
     log.info "Input file:      ${inputSheet}"
     log.info "gVCF mode:       ${gvcfMode}"
-    log.info "Missing genotype:${missingMode ?: ' not set (gVCF mode)'}"
+    log.info "Missing genotype:${missingMode}"
     log.info "No-call policy:  ${noCallsMode}"
     log.info "Score file:      ${scoreFile}"
     log.info "Phenotypes:      ${phenotypeFile ?: 'not provided; ROC/OR plots disabled'}"
@@ -277,6 +270,12 @@ workflow {
 
             if (!safeId) {
                 error "Sample ID '${rawId}' does not contain usable characters"
+            }
+
+            if (safeId == 'NA') {
+                error(
+                    "Pipeline sample ID 'NA' is reserved because TSV outputs use NA to represent missing values."
+                )
             }
 
             if (safeId != rawId) {

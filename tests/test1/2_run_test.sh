@@ -6,5 +6,7 @@ nextflow run "$PWD/../../main.nf" \
     --phenotypes "$PWD/prs_calc_toy/phenotypes.tsv" \
     --target_build hg19 \
     --missing_genotype reference \
+    --no_calls zero \
     -profile conda \
+    --gvcf_mode plain \
     -resume

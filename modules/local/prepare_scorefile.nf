@@ -14,11 +14,15 @@ process PREPARE_SCOREFILE {
     path 'scorefile_qc.tsv',         emit: qc
 
     script:
+    def q = { value ->
+        "'" + value.toString().replace("'", "'\"'\"'") + "'"
+    }
+
     """
     prepare_scorefile.R \
-        --scorefile "${scorefile}" \
-        --target_build "${target_build}" \
-        --output "normalized_scorefile.tsv" \
-        --qc_output "scorefile_qc.tsv"
+        --scorefile ${q.call(scorefile)} \
+        --target_build ${q.call(target_build)} \
+        --output normalized_scorefile.tsv \
+        --qc_output scorefile_qc.tsv
     """
 }
