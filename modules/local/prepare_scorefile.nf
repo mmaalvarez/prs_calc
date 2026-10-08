@@ -18,10 +18,14 @@ process PREPARE_SCOREFILE {
         "'" + value.toString().replace("'", "'\"'\"'") + "'"
     }
 
+    def nonAdditive = params.non_additive
+        .toString().trim().toLowerCase()
+
     """
     prepare_scorefile.R \
         --scorefile ${q.call(scorefile)} \
         --target_build ${q.call(target_build)} \
+        --non_additive ${q.call(nonAdditive)} \
         --output normalized_scorefile.tsv \
         --qc_output scorefile_qc.tsv
     """

@@ -77,6 +77,18 @@ option_list <- list(
         )
     ),
     make_option(
+        "--genotype_calls",
+        dest = "genotype_calls",
+        type = "character",
+        default = "hard"
+    ),
+    make_option(
+        "--non_additive",
+        dest = "non_additive",
+        type = "character",
+        default = "false"
+    ),
+    make_option(
         "--default_ploidy",
         dest = "default_ploidy",
         type = "integer",
@@ -170,6 +182,17 @@ parse_boolean <- function(value, option_name) {
 
     stopf("%s must be true or false", option_name)
 }
+
+genotype_calls <- tolower(trimws(opt$genotype_calls))
+
+if (!genotype_calls %in% c("hard", "soft")) {
+    stopf("--genotype_calls must be hard or soft")
+}
+
+non_additive <- parse_boolean(
+    opt$non_additive,
+    "--non_additive"
+)
 
 strict_alleles <- parse_boolean(
     opt$strict_alleles,
@@ -743,6 +766,10 @@ if ("end" %in% genotype_header) {
     genotype_cols$end <- col_character()
 }
 
+if ("gp" %in% genotype_header) {
+    genotype_cols$gp <- col_character()
+}
+
 genotypes <- read_tsv(
     opt$genotypes,
     na = c("", "NA"),
@@ -750,6 +777,10 @@ genotypes <- read_tsv(
     progress = FALSE,
     col_types = do.call(cols, genotype_cols)
 )
+
+if (!"gp" %in% names(genotypes)) {
+    genotypes$gp <- rep(NA_character_, nrow(genotypes))
+}
 
 if ("end" %in% names(genotypes)) {
     raw_end <- trimws(genotypes$end)
@@ -791,9 +822,23 @@ scores <- read_tsv(
         position = col_integer(),
         effect_allele = col_character(),
         other_allele = col_character(),
-        effect_weight = col_double()
+        effect_weight = col_double(),
+        effect_genotype = col_character()
     )
 )
+
+if (!"effect_genotype" %in% names(scores)) {
+    if (non_additive) {
+        stopf(
+            "--non_additive requires effect_genotype in the normalised score file"
+        )
+    }
+
+    scores$effect_genotype <- rep(
+        NA_character_,
+        nrow(scores)
+    )
+}
 
 if (nrow(scores) == 0L) {
     stopf("The normalised score file contains no variants")
@@ -1425,6 +1470,308 @@ resolve_missing <- function(
     )
 }
 
+canonical_diploid_genotype <- function(bases) {
+    if (
+        length(bases) != 2L ||
+        anyNA(bases) ||
+        any(!grepl("^[ACGT]$", bases))
+    ) {
+        stopf(
+            "Non-additive scoring requires two concrete called alleles"
+        )
+    }
+
+    paste(sort(bases), collapse = "")
+}
+
+non_additive_multiplier <- function(
+    bases,
+    effect_genotypes,
+    variant_id
+) {
+    if (length(bases) != 2L) {
+        stopf(
+            paste0(
+                "Non-additive scoring is diploid-only: ",
+                "variant '%s' has ploidy %d"
+            ),
+            variant_id,
+            length(bases)
+        )
+    }
+
+    as.numeric(
+        canonical_diploid_genotype(bases) %in%
+            effect_genotypes
+    )
+}
+
+# Genotype index combinations in VCF Number=G order.
+# Allele indexes are zero-based.
+vcf_genotype_states <- function(ploidy, max_allele) {
+    if (ploidy == 1L) {
+        return(lapply(
+            seq.int(0L, max_allele),
+            function(a) as.integer(a)
+        ))
+    }
+
+    states <- list()
+
+    for (last in seq.int(0L, max_allele)) {
+        prefixes <- vcf_genotype_states(
+            ploidy - 1L,
+            last
+        )
+
+        for (prefix in prefixes) {
+            states[[length(states) + 1L]] <- c(
+                prefix,
+                last
+            )
+        }
+    }
+
+    states
+}
+
+score_gp <- function(
+    gp_text,
+    gt,
+    alleles,
+    effect_set,
+    effect_genotypes,
+    variant_id
+) {
+    if (
+        length(gp_text) != 1L ||
+        is.na(gp_text) ||
+        !nzchar(trimws(gp_text))
+    ) {
+        return(NULL)
+    }
+
+    gp_text <- trimws(gp_text)
+
+    parts <- trimws(strsplit(
+        gp_text,
+        ",",
+        fixed = TRUE
+    )[[1]])
+
+    missing <- parts %in% c("", ".", "NA")
+
+    # Completely missing GP permits a GT fallback.
+    if (all(missing)) {
+        return(NULL)
+    }
+
+    if (any(missing) || grepl(",$", gp_text)) {
+        stopf(
+            "Incomplete GP vector for variant '%s': %s",
+            variant_id,
+            gp_text
+        )
+    }
+
+    probabilities <- suppressWarnings(as.numeric(parts))
+
+    if (
+        anyNA(probabilities) ||
+        any(!is.finite(probabilities)) ||
+        any(probabilities < 0 | probabilities > 1)
+    ) {
+        stopf(
+            "Invalid GP probabilities for variant '%s': %s",
+            variant_id,
+            gp_text
+        )
+    }
+
+    probability_sum <- sum(probabilities)
+
+    # Permit small decimal-rounding discrepancies only.
+    if (
+        probability_sum <= 0 ||
+        abs(probability_sum - 1) > 1e-3
+    ) {
+        stopf(
+            "GP probabilities for variant '%s' sum to %.8f, not 1",
+            variant_id,
+            probability_sum
+        )
+    }
+
+    probabilities <- probabilities / probability_sum
+
+    n_alleles <- length(alleles)
+    primary_gt <- if (is.na(gt)) {
+        ""
+    } else {
+        sub(":.*$", "", gt)
+    }
+
+    if (!primary_gt %in% c("", ".")) {
+        if (!grepl(
+            "^(\\.|[0-9]+)([/|](\\.|[0-9]+))*$",
+            primary_gt
+        )) {
+            stopf(
+                "Malformed GT '%s' for variant '%s'",
+                gt,
+                variant_id
+            )
+        }
+
+        tokens <- strsplit(
+            primary_gt,
+            "[/|]",
+            perl = TRUE
+        )[[1]]
+
+        ploidy <- length(tokens)
+    } else {
+        # With no informative GT ploidy, infer it from Number=G.
+        # Concrete SNP records normally have at least two alleles.
+        candidates <- seq_len(32L)
+        counts <- vapply(
+            candidates,
+            function(p) choose(n_alleles + p - 1L, p),
+            numeric(1)
+        )
+
+        matches <- candidates[
+            counts == length(probabilities)
+        ]
+
+        if (length(matches) != 1L) {
+            stopf(
+                "Cannot infer GP ploidy for variant '%s'",
+                variant_id
+            )
+        }
+
+        ploidy <- matches[[1]]
+        tokens <- rep(".", ploidy)
+    }
+
+    known <- tokens != "."
+    known_indexes <- suppressWarnings(
+        as.integer(tokens[known])
+    )
+
+    if (
+        anyNA(known_indexes) ||
+        any(known_indexes < 0L) ||
+        any(known_indexes >= n_alleles)
+    ) {
+        stopf(
+            "Invalid GT allele index for variant '%s'",
+            variant_id
+        )
+    }
+
+    if (non_additive && ploidy != 2L) {
+        stopf(
+            "Non-additive GP scoring is diploid-only for variant '%s'",
+            variant_id
+        )
+    }
+
+    expected_count <- choose(
+        n_alleles + ploidy - 1L,
+        ploidy
+    )
+
+    if (length(probabilities) != expected_count) {
+        stopf(
+            paste0(
+                "Wrong GP length for variant '%s': ",
+                "received %d; expected %.0f for %d alleles and ploidy %d"
+            ),
+            variant_id,
+            length(probabilities),
+            expected_count,
+            n_alleles,
+            ploidy
+        )
+    }
+
+    # Avoid unexpectedly allocating enormous Number=G state lists.
+    if (expected_count > 100000L) {
+        stopf(
+            "GP state count exceeds the supported safety limit for variant '%s'",
+            variant_id
+        )
+    }
+
+    states <- vcf_genotype_states(
+        ploidy,
+        n_alleles - 1L
+    )
+
+    dosage <- 0
+    multiplier <- 0
+
+    for (j in seq_along(states)) {
+        probability <- probabilities[[j]]
+
+        if (probability == 0) {
+            next
+        }
+
+        bases <- alleles[states[[j]] + 1L]
+
+        # GP involving NON_REF or other unknown bases cannot
+        # establish an effect-allele dosage.
+        if (
+            anyNA(bases) ||
+            any(!grepl("^[ACGT]$", bases))
+        ) {
+            stopf(
+                paste0(
+                    "GP assigns positive probability to a symbolic/unknown ",
+                    "allele for variant '%s'"
+                ),
+                variant_id
+            )
+        }
+
+        allele_count <- sum(bases %in% effect_set)
+        dosage <- dosage + probability * allele_count
+
+        state_multiplier <- if (non_additive) {
+            non_additive_multiplier(
+                bases,
+                effect_genotypes,
+                variant_id
+            )
+        } else {
+            allele_count
+        }
+
+        multiplier <- multiplier +
+            probability * state_multiplier
+    }
+
+    displayed <- rep(".", ploidy)
+
+    if (any(known)) {
+        known_bases <- alleles[known_indexes + 1L]
+        displayed[known] <- known_bases
+    }
+
+    list(
+        dosage = as.numeric(dosage),
+        multiplier = as.numeric(multiplier),
+        known_alleles = sum(known),
+        missing_alleles = sum(!known),
+        full_no_call = !any(known),
+        partial_no_call = any(known) && any(!known),
+        called_alleles = paste(displayed, collapse = "/")
+    )
+}
+
 detail_rows <- vector(
     "list",
     nrow(scores)
@@ -1440,6 +1787,33 @@ for (i in seq_len(nrow(scores))) {
     other_allele <- score_row$other_allele[[1]]
     effect_weight <- score_row$effect_weight[[1]]
     key <- score_row$key[[1]]
+    effect_genotype <- score_row$effect_genotype[[1]]
+    effect_genotypes <- if (non_additive) {
+        if (
+            is.na(effect_genotype) ||
+            !grepl(
+                "^[ACGT]{2}(/[ACGT]{2})*$",
+                effect_genotype
+            )
+        ) {
+            stopf(
+                "Invalid normalised effect_genotype for variant '%s'",
+                variant_id
+            )
+        }
+
+        strsplit(
+            effect_genotype,
+            "/",
+            fixed = TRUE
+        )[[1]]
+    } else {
+        character(0)
+    }
+
+    gp_used <- FALSE
+    gp_text <- NA_character_
+    scoring_multiplier <- NA_real_
     partial_no_call <- FALSE
     gt_known_alleles <- NA_integer_
     gt_missing_alleles <- NA_integer_
@@ -1623,6 +1997,18 @@ for (i in seq_len(nrow(scores))) {
             sep = ":"
         )
 
+        if (genotype_calls == "soft") {
+            signatures <- paste(
+                signatures,
+                ifelse(
+                    is.na(records$gp),
+                    ".",
+                    records$gp
+                ),
+                sep = ":"
+            )
+        }
+
         if (length(unique(signatures)) > 1L) {
             stopf(
                 paste0(
@@ -1690,7 +2076,57 @@ for (i in seq_len(nrow(scores))) {
         # For the INSIDE of a no-call interval, its start REF is not
         # the REF base at this scored position. Leave vcf_ref as NA.
 
-        if (is_full_no_call(genotype)) {
+        gp_text <- selected_record$gp[[1]]
+        gp_result <- NULL
+
+        # Reference-only records/intervals retain the existing
+        # hom-ref and no-call handling. GP scoring is performed
+        # on concrete SNP records.
+        if (
+            genotype_calls == "soft" &&
+            !selected_record$is_reference_only[[1]]
+        ) {
+            alleles <- validate_snp_alleles(
+                vcf_ref,
+                vcf_alt,
+                effect_set,
+                other_set,
+                chromosome,
+                position,
+                variant_id
+            )
+
+            gp_result <- score_gp(
+                gp_text = gp_text,
+                gt = genotype,
+                alleles = alleles,
+                effect_set = effect_set,
+                effect_genotypes = effect_genotypes,
+                variant_id = variant_id
+            )
+
+            non_model_call <- (
+                length(other_set) == 0L &&
+                    any(
+                        !(gp_result$known_bases %in% effect_set)
+                    )
+            )
+        }
+
+        if (!is.null(gp_result)) {
+            gp_used <- TRUE
+            dosage <- gp_result$dosage
+            scoring_multiplier <- gp_result$multiplier
+
+            called_alleles_text <- gp_result$called_alleles
+            gt_known_alleles <- gp_result$known_alleles
+            gt_missing_alleles <- gp_result$missing_alleles
+
+            no_call <- gp_result$full_no_call
+            partial_no_call <- gp_result$partial_no_call
+
+            status <- "observed_gp"
+        } else if (is_full_no_call(genotype)) {
             if (no_calls_mode == "error") {
                 stopf(
                     "Score SNP '%s' at %s:%d has GT=%s and --no_calls=error",
@@ -1904,8 +2340,53 @@ for (i in seq_len(nrow(scores))) {
         }
     }
     
-    if (!is.na(dosage)) {
-        contribution <- effect_weight * dosage
+    if (!gp_used) {
+        # Default additive behaviour remains unchanged.
+        scoring_multiplier <- dosage
+
+        if (non_additive) {
+            if (no_call || partial_no_call) {
+                # A missing allele cannot establish a listed
+                # complete diploid genotype.
+                scoring_multiplier <- 0
+
+                if (partial_no_call) {
+                    status <- "partial_no_call_non_additive_set_to_zero"
+                }
+            } else if (
+                !is.na(called_alleles_text) &&
+                nzchar(called_alleles_text)
+            ) {
+                # Includes complete SNP GTs and validated hom-ref
+                # sites/blocks.
+                bases <- strsplit(
+                    called_alleles_text,
+                    "/",
+                    fixed = TRUE
+                )[[1]]
+
+                scoring_multiplier <- non_additive_multiplier(
+                    bases,
+                    effect_genotypes,
+                    variant_id
+                )
+            } else if (dosage_from_reference) {
+                # Explicit --missing_genotype reference assumption.
+                scoring_multiplier <- non_additive_multiplier(
+                    rep(reference_base, default_ploidy),
+                    effect_genotypes,
+                    variant_id
+                )
+            } else {
+                # An absent position assigned zero has no observed
+                # genotype, even if its reference base is known.
+                scoring_multiplier <- 0
+            }
+        }
+    }
+
+    if (!is.na(scoring_multiplier)) {
+        contribution <- effect_weight * scoring_multiplier
     }
 
     detail_rows[[i]] <- tibble(
@@ -1921,10 +2402,8 @@ for (i in seq_len(nrow(scores))) {
         other_allele = other_allele,
         effect_weight = effect_weight,
         reference_allele = reference_base,
-        effect_allele_is_reference =
-            effect_is_reference,
-        other_allele_is_reference =
-            other_is_reference,
+        effect_allele_is_reference = effect_is_reference,
+        other_allele_is_reference = other_is_reference,
         vcf_record_found = vcf_record_at_position,
         reference_block_found = reference_block_found,
         reference_block = reference_block_text,
@@ -1941,9 +2420,14 @@ for (i in seq_len(nrow(scores))) {
         gt_missing_alleles = gt_missing_alleles,
         vcf_ref_relation = vcf_ref_relation,
         non_model_allele_call = non_model_call,
-        dosage_from_reference =
-            dosage_from_reference,
+        dosage_from_reference = dosage_from_reference,
         effect_allele_dosage = dosage,
+        genotype_calls = genotype_calls,
+        non_additive = non_additive,
+        effect_genotype = effect_genotype,
+        gp = gp_text,
+        gp_used = gp_used,
+        scoring_multiplier = scoring_multiplier,
         contribution = contribution,
         status = status
     )
@@ -1954,12 +2438,14 @@ details <- bind_rows(detail_rows) %>%
 
 if (
     anyNA(details$effect_allele_dosage) ||
+    anyNA(details$scoring_multiplier) ||
     anyNA(details$contribution) ||
     any(!is.finite(details$effect_allele_dosage)) ||
+    any(!is.finite(details$scoring_multiplier)) ||
     any(!is.finite(details$contribution))
 ) {
     stopf(
-        "Internal error: an SNP has a missing or non-finite dosage/contribution"
+        "Internal error: an SNP has a missing or non-finite dosage/multiplier/contribution"
     )
 }
 
@@ -2015,7 +2501,8 @@ usable_hom_ref_evidence <- details$status %in% c(
 usable_observed_call <- (
     details$status %in% c(
         "observed",
-        "observed_nonmodel_allele"
+        "observed_nonmodel_allele",
+        "observed_gp"
     ) |
     (
         usable_hom_ref_evidence &
@@ -2040,7 +2527,17 @@ covered_fraction <- mean(
     usable_coverage
 )
 
-partial_rows <- which(details$vcf_partial_no_call)
+# The overall count describes GT fields, including GTs whose
+# missing alleles were superseded by usable GP.
+n_vcf_partial_no_calls <- sum(
+    details$vcf_partial_no_call
+)
+
+# These are the partial GTs actually handled by hard-call rules.
+partial_rows <- which(
+    details$vcf_partial_no_call
+)
+
 n_vcf_partial_no_calls <- length(partial_rows)
 
 n_known_alleles_in_partial_calls <- sum(
@@ -2051,25 +2548,60 @@ n_missing_alleles_in_partial_calls <- sum(
     details$gt_missing_alleles[partial_rows]
 )
 
-partial_no_call_warning <- if (n_vcf_partial_no_calls > 0L) {
-    sprintf(
-        paste0(
-            "Sample '%s': --no_calls=zero partially scored %d score ",
-            "row(s) (first score_row IDs: %s). Only known genotype ",
-            "alleles were used to count effect copies (%d known ",
-            "copy/copies); %d missing copy/copies contributed zero. ",
-            "These SNP contributions are incomplete and are excluded ",
-            "from covered_fraction."
-        ),
-        opt$sample_id,
-        n_vcf_partial_no_calls,
-        paste(
-            head(details$score_row[partial_rows], 20L),
-            collapse = ","
-        ),
-        n_known_alleles_in_partial_calls,
-        n_missing_alleles_in_partial_calls
-    )
+hard_partial_rows <- partial_rows[
+    !details$gp_used[partial_rows]
+]
+
+n_partial_gt_scored_hard <- length(
+    hard_partial_rows
+)
+
+n_known_alleles_in_partial_hard_calls <- sum(
+    details$gt_known_alleles[hard_partial_rows]
+)
+
+n_missing_alleles_in_partial_hard_calls <- sum(
+    details$gt_missing_alleles[hard_partial_rows]
+)
+
+partial_no_call_warning <- if (
+    n_partial_gt_scored_hard > 0L
+) {
+    if (non_additive) {
+        sprintf(
+            paste0(
+                "Sample '%s': --no_calls=zero assigned zero ",
+                "non-additive multipliers to %d partially missing ",
+                "hard-call score row(s) (first score_row IDs: %s). ",
+                "Incomplete genotypes cannot establish membership ",
+                "in effect_genotype and are excluded from covered_fraction."
+            ),
+            opt$sample_id,
+            n_partial_gt_scored_hard,
+            paste(
+                head(details$score_row[partial_rows], 20L),
+                collapse = ","
+            )
+        )
+    } else {
+        sprintf(
+            paste0(
+                "Sample '%s': --no_calls=zero partially scored %d ",
+                "hard-call score row(s) (first score_row IDs: %s). ",
+                "%d known allele copy/copies were used; %d missing ",
+                "copy/copies contributed zero. These contributions ",
+                "are incomplete and excluded from covered_fraction."
+            ),
+            opt$sample_id,
+            n_partial_gt_scored_hard,
+            paste(
+                head(details$score_row[partial_rows], 20L),
+                collapse = ","
+            ),
+            n_known_alleles_in_partial_calls,
+            n_missing_alleles_in_partial_calls
+        )
+    }
 } else {
     NA_character_
 }
@@ -2279,6 +2811,11 @@ summary <- tibble(
     n_block_ref_not_genome_ref = n_block_ref_not_genome_ref,
     input_is_gvcf = input_is_gvcf,
     gvcf_mode_declared = gvcf_mode_declared,
+    genotype_calls = genotype_calls,
+    non_additive = non_additive,
+    n_gp_scored_variants = sum(details$gp_used),
+    n_partial_gt_scored_hard = n_partial_gt_scored_hard,
+    total_scoring_multiplier = sum(details$scoring_multiplier),
     missing_genotype_requested = requested_missing_mode,
     missing_genotype_mode = missing_mode,
     no_calls_mode = no_calls_mode,
