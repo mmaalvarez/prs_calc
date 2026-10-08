@@ -75,6 +75,29 @@ workflow {
         )
     }
 
+    def genotypeCalls = (params.genotype_calls ?: 'hard')
+        .toString()
+        .trim()
+        .toLowerCase()
+
+    if (!(genotypeCalls in ['hard', 'soft'])) {
+        error(
+            "--genotype_calls must be hard or soft; " +
+            "received '${params.genotype_calls}'"
+        )
+    }
+
+    def nonAdditiveText = params.non_additive
+        .toString()
+        .trim()
+        .toLowerCase()
+
+    if (!(nonAdditiveText in ['true', 'false'])) {
+        error '--non_additive must be true or false'
+    }
+
+    def nonAdditive = nonAdditiveText == 'true'
+
     def missingMode = params.missing_genotype == null
         ? ''
         : params.missing_genotype.toString().trim().toLowerCase()
@@ -173,6 +196,8 @@ workflow {
     log.info "Missing genotype:${missingMode}"
     log.info "No-call policy:  ${noCallsMode}"
     log.info "Score file:      ${scoreFile}"
+    log.info "Genotype calls: ${genotypeCalls}"
+    log.info "Scoring model:  ${nonAdditive ? 'non-additive' : 'additive'}"
     log.info "Phenotypes:      ${phenotypeFile ?: 'not provided; ROC/OR plots disabled'}"
     log.info "Target build:    ${targetBuild}"
     log.info "Output directory:${params.outdir}"

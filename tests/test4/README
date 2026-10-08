@@ -1,0 +1,68 @@
+Test the --genotype_calls and --non_additive parameters
+
+
+Toy-file and test-command generator
+-----------------------------------
+
+The script make_prs_toys.py generates:
+
+14 small, single-sample VCF/gVCF fixtures, compressed and indexed.
+A score table for each fixture.
+A toy all-A reference FASTA and index.
+All four combinations of:
+--non_additive false/true
+--genotype_calls hard/soft
+Additional --no_calls zero runs for missing-GT fixtures.
+Independently calculated expected raw score totals.
+A shell script that runs all 64 tests and records exit codes.
+Assumptions behind the expected results
+These test the corrected design discussed above:
+
+Usable GP takes precedence over missing/partial GT in soft mode.
+Missing GP falls back to hard-call scoring.
+Present but invalid GP raises an error in soft mode—it is not silently treated as absent.
+Non-additive scoring requires a complete diploid genotype unless GP supplies the diploid distribution.
+Called symbolic alleles remain unsupported.
+Reference-block GP is not reused at internal score positions.
+Two expectations are explicitly conditional:
+
+GP-only input: optional, depending on whether the implementation and preflight support it.
+Reference blocks: numeric expectations assume the existing reference policy accepts fully called 0/0 blocks.
+
+
+The runner deliberately continues after failed tests. Examine:
+
+text
+toy_prs/expected.tsv
+toy_prs/exit_codes.tsv
+toy_prs/logs/
+toy_prs/results/
+
+An expected error should fail for the intended validation reason, not because of an unrelated environment or CLI problem.
+
+
+Expected totals
+--------------
+These are raw weighted sums, not standardized scores or percentiles.
+
+Fixture	Hard additive	Soft additive	Hard non-additive	Soft non-additive
+complete_gp	1.6800	1.5768	0.9600	0.7752
+no_gp_header	1.6800	1.6800	0.9600	0.9600
+mixed_gp	1.6800	1.5960	0.9600	0.8400
+multiallelic	0.2400	0.1560	0.2400	0.0840
+gvcf_snp_zero_symbolic_gp	0.4800	0.4368	0.2400	0.1992
+gvcf_reference_block*	0.9600	0.9600	0.4800	0.4800
+* Assuming fully called reference blocks are accepted as reference evidence. If your existing policy handles them differently, adjust those totals; hard and soft should still agree for these block-only rows under the proposed GP exclusion.
+
+
+For nocalls_valid_gp in soft mode, the corrected partial-GT diagnostics should report:
+
+text
+n_vcf_partial_no_calls             = 1
+n_known_alleles_in_partial_calls   = 1
+n_missing_alleles_in_partial_calls = 1
+n_partial_gt_scored_hard           = 0
+
+Both rows should be scored from GP. If the known/missing counts instead become zero, the QC inconsistency identified in the previous review is still present.
+
+The script records exit codes but does not automatically extract and assert report scores, because your report schema was not supplied. Compare the raw score totals with expected.tsv, as well as coverage, statuses, and QC fields. I have not executed these tests against your pipeline.

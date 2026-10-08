@@ -5,12 +5,19 @@ from a SNP score file and one-sample VCF, gVCF, or BCF files. It produces
 variant-level scoring details, per-sample plots, and, optionally, cohort ROC
 and PRS-decile odds-ratio plots.
 
-For each retained score row, the pipeline calculates:
+For each retained score row, by default the pipeline uses additive scoring based on hard genotype calls:
 
 ```text
-contribution = effect_weight × effect-allele dosage
-PRS          = sum of contributions
+effect_allele_dosage = number of called alleles in the effect_allele set
+scoring_multiplier  = effect_allele_dosage
+contribution        = effect_weight × scoring_multiplier
+PRS                 = sum of contributions
 ```
+
+`--genotype_calls soft` optionally uses genotype posterior probabilities
+from FORMAT/GP (see [Hard and soft genotype scoring](#hard-and-soft-genotype-scoring)); 
+`--non_additive` instead uses an explicitly specified set of effect genotypes 
+(see [Non-additive genotype models](non-additive-genotype-models)).
 
 The dosage is the number of called genotype alleles belonging to the score
 row's `effect_allele` set. The final result is a raw PRS; to standardize it, 
@@ -42,7 +49,7 @@ nextflow run mmaalvarez/prs_calc -r main -latest \
 If you downloaded the latest release to run the pipeline locally, the run 
 command should instead be:
 ```bash
-nextflow run path/to/prs_calc/main.nf \
+nextflow run path/to/prs_calc-<version>/main.nf \
   (...)
   (remaining parameters don't change)
 ```
@@ -167,6 +174,148 @@ Choose a score file and VCF that genuinely use compatible coordinates
 and reference assemblies. Merely setting `--target_build` does not
 liftover either input.
 
+### Hard and soft genotype scoring
+
+`--genotype_calls` accepts:
+
+- `hard` (default): score using the called GT alleles, as in previous
+  versions of the pipeline.
+- `soft`: when a concrete SNP record contains usable FORMAT/GP, score
+  using genotype posterior probabilities. If GP is absent or wholly
+  missing, fall back to hard GT scoring.
+
+For additive scoring, the soft multiplier is the expected number of
+effect-allele copies:
+
+```text
+scoring_multiplier = sum over genotypes:
+                     P(genotype) × effect-allele copies in genotype
+```
+
+For a diploid biallelic SNP, GP is ordered as:
+
+```text
+P(0/0), P(0/1), P(1/1)
+```
+
+For example:
+
+```text
+REF=A
+ALT=T
+FORMAT=GT:DS:GP
+SAMPLE=0|0:0:0.83,0.16,0.01
+effect_allele=A
+effect_weight=0.24
+```
+
+The contribution is:
+
+```text
+hard: 0.24 × 2                         = 0.48
+soft: 0.24 × (2 × 0.83 + 1 × 0.16)    = 0.4368
+```
+
+The pipeline uses GP, not DS or PL. GP must contain probabilities in
+[0,1], in VCF Number=G order, with the correct number of values for the
+record's alleles and ploidy.
+
+Multiallelic GP is supported. Additive GP scoring also supports
+non-diploid genotypes. If GT is absent or represented by a single `.`,
+ploidy is inferred from the GP vector when possible.
+
+Malformed, partially missing, or incompatible GP causes an error rather
+than a silent hard-call fallback. Probability sums within 0.001 of 1
+are normalised to 1; larger discrepancies cause an error. GP vectors
+requiring more than 100,000 genotype states are rejected.
+
+A positive GP probability assigned to a symbolic/unknown allele cannot
+be interpreted as a concrete effect-allele dosage and causes an error.
+
+Usable GP takes precedence over wholly or partially missing GT:
+`--no_calls` applies when scoring falls back to GT. Such GP-scored rows
+count as usable coverage even when their GT field is missing.
+
+Reference-only hom-ref records/blocks and reference-only no-call
+intervals retain their existing GT-based handling.
+
+### Non-additive genotype models
+
+Providing `--non_additive` requires an `effect_genotype` column in the
+score table. This option applies to every retained score row.
+
+The column contains slash-separated, unphased, diploid nucleotide
+genotypes:
+
+```text
+effect_genotype
+AA
+GG/TT
+AA/AT
+GG/GA/TT
+CC/CG/AA/AT
+```
+
+The listed genotypes form an explicit set. The pipeline does not infer
+additional genotypes that were not listed.
+
+For hard calls:
+
+```text
+scoring_multiplier = 1 if the complete genotype is listed
+                     0 otherwise
+
+contribution = effect_weight × scoring_multiplier
+```
+
+Thus:
+
+- `AA` expresses a recessive A model.
+- `AA/AT` expresses a dominant A model at an A/T biallelic SNP.
+- `GG/GA/TT` gives the full effect to GG, GA, or TT, but not to GT or TA.
+
+Genotype allele order and phasing are ignored: AG and GA are equivalent,
+as are 0/1 and 1|0 when they represent the same bases.
+
+At least one homozygous genotype must be listed. Each listed
+heterozygous genotype must contain a base whose homozygous genotype
+is also listed. Homozygous effect bases must belong to `effect_allele`.
+When `other_allele` is supplied, every listed genotype base must belong
+to the declared effect/other allele sets.
+
+`effect_allele` and the other usual score-table columns remain required.
+
+With both `--non_additive` and `--genotype_calls soft`:
+
+```text
+scoring_multiplier = sum of GP probabilities for listed effect genotypes
+```
+
+For example, with REF=A, ALT=T, GP=0.83,0.16,0.01 and weight 0.24:
+
+```text
+effect_genotype=AA:
+    contribution = 0.24 × 0.83 = 0.1992
+
+effect_genotype=AA/AT:
+    contribution = 0.24 × (0.83 + 0.16) = 0.2376
+```
+
+Non-additive scoring is diploid-only. Complete called genotypes,
+validated hom-ref evidence, and assumed reference genotypes must be
+diploid when used to evaluate the genotype set.
+
+When hard-call no-call handling is used:
+
+- `--no_calls error` rejects wholly or partially missing GT.
+- `--no_calls zero` assigns a zero non-additive multiplier to wholly
+  or partially missing GT; known alleles alone do not establish a
+  complete listed genotype.
+
+Absent positions assigned zero remain unobserved and contribute zero.
+With `--missing_genotype reference`, the assumed reference genotype
+is checked against the effect-genotype set.
+
 ### VCF versus gVCF detection
 
 `--gvcf_mode` defaults to `auto`, and tries to infer whether the input has a gVCF 
@@ -182,7 +331,8 @@ explicitly.
 | Called SNP genotype | Count the copies of bases in the effect set. |
 | Validated reference-only hom-ref record or block | Score using its hom-ref GT ploidy, regardless of the missing-site policy. |
 | No matching record or hom-ref block | Apply `--missing_genotype`. |
-| Explicit wholly missing SNP GT, such as `./.` | Apply `--no_calls`. |
+| Explicit wholly missing SNP GT (e.g. `./.`) with no usable GP selected | Apply `--no_calls`. |
+| Usable GP selected in soft mode | Score from genotype probabilities, regardless of whether GT is wholly or partially missing. |
 
 `--missing_genotype` is always required; it takes the following options:
 
@@ -222,7 +372,13 @@ REF=G, ALT=A, effect=G, weight=0.25, this gives:
 | ./. | missing | 0 | 0 |
 | 0/0 | G/G | 2 | 0.50 |
 
-If `--no_calls error`, a partially missing GT aborts.
+For GT-based scoring, including soft-mode fallback when GP is
+unavailable, `--no_calls error` aborts on wholly or partially missing GT 
+(e.g. `./.`, `0|.`).
+
+In soft mode, usable GP takes precedence over GT. A missing or partially
+missing GT does not cause a no-call failure when usable GP supplies the
+scoring multiplier.
 
 Other malformed GTs always abort. Allele-incompatible sites can still abort 
 even if a `zero` policy was selected. Conversely, zero-imputed positions 
@@ -241,13 +397,19 @@ covered_fraction =
 ```
 
 No-calls assigned zero and absent positions assigned zero or assumed
-reference are **not** covered. Partial GTs are also excluded from 
-covered_fraction, even though they contribute to the raw PRS, because 
-usable_observed_call explicitly lists only "observed" and 
-"observed_nonmodel_allele". A threshold such as `--min_covered_fraction 0.95` 
-fails a sample below 95% usable coverage. This check occurs after that 
-task writes its TSVs: they can be inspected in the failed task's Nextflow 
-work directory, but a failed run will not produce the merged PRS report.
+reference are **not** covered. Partial GTs scored using hard-call rules are 
+also excluded from covered_fraction, even though they contribute to the raw 
+PRS, because usable_observed_call explicitly lists only "observed" and 
+"observed_nonmodel_allele". A row scored from usable GP is included, even if 
+its GT field is wholly or partially missing. A threshold such as 
+`--min_covered_fraction 0.95` fails a sample below 95% usable coverage. 
+This check occurs after that task writes its TSVs: they can be inspected in 
+the failed task's Nextflow work directory, but a failed run will not produce 
+the merged PRS report.
+
+In soft mode, covered_fraction measures availability of usable scoring
+evidence; it does not measure genotype certainty. A diffuse GP
+distribution can still count as covered.
 
 In a successful summary, `n_scored_variants` equals the number of retained
 score rows, **including zero-imputed rows**. Do not interpret it as the
@@ -324,6 +486,31 @@ assumption. Per-sample contribution plots show the largest absolute
 contributions; `--plot_top_variants` sets their maximum count
 (default: 25). Status plots count variant-scoring statuses.
 
+Variant details also include:
+
+- `genotype_calls`: requested hard/soft mode.
+- `non_additive`: whether genotype-set scoring was enabled.
+- `effect_genotype`: the normalised genotype set, when enabled.
+- `gp`: queried GP for an explicitly selected SNP record.
+- `gp_used`: whether probabilities supplied the scoring multiplier.
+- `scoring_multiplier`: the value actually multiplied by effect_weight.
+
+n_vcf_partial_no_calls, n_known_alleles_in_partial_calls, and
+n_missing_alleles_in_partial_calls describe all partial GT fields,
+including those superseded by usable GP.
+
+n_partial_gt_scored_hard counts partial GT rows actually handled by
+hard-call scoring rules.
+
+`effect_allele_dosage` remains an effect-allele count: it can be fractional
+when GP is used. In non-additive mode it is not the scoring multiplier.
+
+Sample summaries include `n_gp_scored_variants`,
+`n_partial_gt_scored_hard`, and `total_scoring_multiplier`.
+
+No-call counts describe GT fields. In soft mode, a missing GT can coexist
+with usable GP coverage; inspect `gp_used` and the scoring status.
+
 The default publishing mode is `copy`; it can be changed with
 `--publish_dir_mode`.
 
@@ -370,6 +557,12 @@ The default publishing mode is `copy`; it can be changed with
   `bcftools norm -m -`— will generally fail at a scored position. Multiallelic 
   sites should remain represented jointly, or implement deliberate reconciliation 
   of split records.
+- `--genotype_calls soft` uses interpretable GP only at SNP records; it still 
+  applies the hard GT-based handling for the reference-only blocks.
+- For non-additive scoring, effect_weight must be a coefficient appropriate
+  for the specified genotype model. Changing an additive score to a dominant or 
+  recessive multiplier does not make its original additive coefficient a validated 
+  coefficient for that new model.
 
 Maintainer: Miguel Martín Álvarez, PhD  
 Contact: miguel.m.alvarez3[--at--]gmail[--dot--]com

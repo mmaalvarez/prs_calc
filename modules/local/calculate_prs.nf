@@ -40,7 +40,10 @@ process CALCULATE_PRS {
     def gvcfMode = (params.gvcf_mode ?: 'auto')
         .toString().trim().toLowerCase()
     def defaultPloidy = params.default_ploidy as Integer
-
+    def genotypeCalls = params.genotype_calls
+        .toString().trim().toLowerCase()
+    def nonAdditive = params.non_additive
+        .toString().trim().toLowerCase()
     def minCoveredArgument = params.min_covered_fraction == null
         ? ''
         : "--min_covered_fraction ${q.call(params.min_covered_fraction)}"
@@ -122,8 +125,25 @@ process CALCULATE_PRS {
         end_field='.'
     fi
 
-    printf 'chrom\\tposition\\tref\\talt\\tend\\tgenotype\\n' \
+    printf 'chrom\\tposition\\tref\\talt\\tend\\tgenotype\\tgp\\n' \
         > queried_genotypes.tsv
+
+    # determine GP availability without allowing every undefined tag
+    
+    gp_field='.'
+    if grep -q '^##FORMAT=<ID=GP[,>]' vcf_header.txt; then
+        gp_field='%GP'
+    fi
+
+    gt_field='%GT'
+
+    # Optional support for GP-only soft input:
+    # represent an undeclared GT as unavailable, not as an explicit ".".
+    # The R reader converts this NA marker to NA.
+    if [[ "${genotypeCalls}" == "soft" ]] &&
+       ! grep -q '^##FORMAT=<ID=GT[,>]' vcf_header.txt; then
+        gt_field='NA'
+    fi
 
     if [[ -s targets.tsv ]]; then
         bcftools view \
@@ -132,8 +152,9 @@ process CALCULATE_PRS {
             -Ou \
             ${vcfArg} \
         | bcftools query \
-            --format "%CHROM\\t%POS\\t%REF\\t%ALT\\t\${end_field}[\\t%GT]\\n" \
-        >> queried_genotypes.tsv
+            --allow-undef-tag \
+            --format "%CHROM\\t%POS\\t%REF\\t%ALT\\t\${end_field}[\\t%GT\\t%GP]\\n" \
+            >> queried_genotypes.tsv
     fi
 
     verify_vcf_query.py \
@@ -148,6 +169,8 @@ process CALCULATE_PRS {
         --source_vcf ${sourceVcfArg} \
         --input_is_gvcf "\${is_gvcf}" \
         --gvcf_mode "${gvcfMode}" \
+        --genotype_calls "${genotypeCalls}" \
+        --non_additive "${nonAdditive}" \
         --missing_genotype "${missingMode}" \
         --no_calls "${noCallsMode}" ${minCoveredArgument} \
         --target_build ${buildArg} \

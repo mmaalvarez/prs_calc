@@ -32,12 +32,26 @@ option_list <- list(
         dest = "qc_output",
         type = "character",
         default = "scorefile_qc.tsv"
+    ),
+    make_option(
+        "--non_additive",
+        dest = "non_additive",
+        type = "character",
+        default = "false"
     )
 )
 
 opt <- parse_args(
     OptionParser(option_list = option_list)
 )
+
+non_additive_text <- tolower(trimws(opt$non_additive))
+
+if (!non_additive_text %in% c("true", "false")) {
+    stopf("--non_additive must be true or false")
+}
+
+non_additive <- non_additive_text == "true"
 
 if (is.null(opt$scorefile) || !nzchar(opt$scorefile)) {
     stopf("--scorefile is required")
@@ -132,6 +146,13 @@ required_columns <- c(
     "effect_weight",
     position_column
 )
+
+if (non_additive) {
+    required_columns <- c(
+        required_columns,
+        "effect_genotype"
+    )
+}
 
 missing_columns <- setdiff(required_columns, names(score))
 
@@ -499,6 +520,144 @@ if (any(overlapping_alleles)) {
     )
 }
 
+canonical_diploid_genotype <- function(value) {
+    paste(
+        sort(strsplit(value, "", fixed = TRUE)[[1]]),
+        collapse = ""
+    )
+}
+
+effect_genotype <- rep(NA_character_, nrow(score))
+
+if (non_additive) {
+    effect_genotype <- vapply(
+        seq_len(nrow(score)),
+        function(i) {
+            original_row <- original_score_rows[[i]]
+
+            value <- toupper(
+                gsub(
+                    "[[:space:]]+",
+                    "",
+                    as.character(score$effect_genotype[[i]])
+                )
+            )
+
+            if (
+                is.na(value) ||
+                !grepl("^[ACGT]{2}(/[ACGT]{2})*$", value)
+            ) {
+                stopf(
+                    paste0(
+                        "Invalid effect_genotype at original score row %d: ",
+                        "expected diploid base pairs such as AA or AA/AT"
+                    ),
+                    original_row
+                )
+            }
+
+            genotypes <- strsplit(
+                value,
+                "/",
+                fixed = TRUE
+            )[[1]]
+
+            genotypes <- sort(unique(vapply(
+                genotypes,
+                canonical_diploid_genotype,
+                character(1)
+            )))
+
+            first_base <- substr(genotypes, 1L, 1L)
+            second_base <- substr(genotypes, 2L, 2L)
+            homozygous <- first_base == second_base
+
+            if (!any(homozygous)) {
+                stopf(
+                    paste0(
+                        "effect_genotype at original score row %d ",
+                        "must include at least one homozygous genotype"
+                    ),
+                    original_row
+                )
+            }
+
+            homozygous_bases <- first_base[homozygous]
+
+            effect_set <- strsplit(
+                effect_allele[[i]],
+                "/",
+                fixed = TRUE
+            )[[1]]
+
+            other_set <- if (is.na(other_allele[[i]])) {
+                character(0)
+            } else {
+                strsplit(
+                    other_allele[[i]],
+                    "/",
+                    fixed = TRUE
+                )[[1]]
+            }
+
+            # Keep the effect_genotype model consistent with the
+            # score's declared effect alleles.
+            if (!all(homozygous_bases %in% effect_set)) {
+                stopf(
+                    paste0(
+                        "Homozygous effect_genotype base(s) at original ",
+                        "score row %d must belong to effect_allele"
+                    ),
+                    original_row
+                )
+            }
+
+            heterozygous <- which(!homozygous)
+
+            if (length(heterozygous) > 0L) {
+                linked_to_homozygote <- (
+                    first_base[heterozygous] %in% homozygous_bases |
+                    second_base[heterozygous] %in% homozygous_bases
+                )
+
+                if (!all(linked_to_homozygote)) {
+                    stopf(
+                        paste0(
+                            "Each heterozygous effect_genotype at original ",
+                            "score row %d must contain an allele with a ",
+                            "listed homozygous genotype"
+                        ),
+                        original_row
+                    )
+                }
+            }
+
+            if (length(other_set) > 0L) {
+                genotype_bases <- unique(c(
+                    first_base,
+                    second_base
+                ))
+
+                if (!all(
+                    genotype_bases %in% c(effect_set, other_set)
+                )) {
+                    stopf(
+                        paste0(
+                            "effect_genotype at original score row %d ",
+                            "contains bases outside effect_allele/other_allele"
+                        ),
+                        original_row
+                    )
+                }
+            }
+
+            paste(genotypes, collapse = "/")
+        },
+        character(1),
+        USE.NAMES = FALSE
+    )
+}
+
 effect_weight <- suppressWarnings(
     as.numeric(score$effect_weight)
 )
@@ -553,6 +712,7 @@ normalized <- tibble(
     position = position,
     effect_allele = effect_allele,
     other_allele = other_allele,
+    effect_genotype = effect_genotype,
     effect_weight = effect_weight
 )
 
@@ -568,6 +728,7 @@ qc <- tibble(
     source_scorefile = basename(opt$scorefile),
     target_build = target_build,
     position_column = position_column,
+    non_additive = non_additive,
     n_input_rows = n_input_rows,
     n_output_rows = nrow(normalized),
     n_skipped_non_snv = n_skipped_non_snv,
