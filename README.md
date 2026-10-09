@@ -54,7 +54,7 @@ nextflow run path/to/prs_calc-<version>/main.nf \
   (remaining parameters don't change)
 ```
 
-**Both `--missing_genotype` and `--no_calls` must be supplied.** The example's
+**Both** `--missing_genotype` **and** `--no_calls` **must be supplied.** The example's
 `error` policies require every score position to have usable evidence; a
 variant-only VCF that omits score positions will fail. See [Missing genotypes
 and no-calls](#missing-genotypes-and-no-calls) before choosing different
@@ -101,7 +101,7 @@ the VCF header; conflicting records at the same normalized score position
 cause an error. If none of the score chromosomes map to VCF contigs, the
 sample fails. Successful per-sample reports appear under 
 `pipeline_info/target_mapping/`. **Only primary chromosomes** are accepted 
-(e.g. chr1_KI270706v1_random is not accepted)
+(e.g. `chr1_KI270706v1_random` is not accepted)
 
 ## Score file
 
@@ -209,7 +209,7 @@ effect_allele=A
 effect_weight=0.24
 ```
 
-The contribution is:
+In this example the contribution is:
 
 ```text
 hard: 0.24 × 2                         = 0.48
@@ -291,7 +291,7 @@ With both `--non_additive` and `--genotype_calls soft`:
 scoring_multiplier = sum of GP probabilities for listed effect genotypes
 ```
 
-For example, with REF=A, ALT=T, GP=0.83,0.16,0.01 and weight 0.24:
+For example, with `REF=A`, `ALT=T`, `GP=0.83,0.16,0.01` and `effect_weight=0.24`:
 
 ```text
 effect_genotype=AA:
@@ -495,11 +495,11 @@ Variant details also include:
 - `gp_used`: whether probabilities supplied the scoring multiplier.
 - `scoring_multiplier`: the value actually multiplied by effect_weight.
 
-n_vcf_partial_no_calls, n_known_alleles_in_partial_calls, and
-n_missing_alleles_in_partial_calls describe all partial GT fields,
+`n_vcf_partial_no_calls`, `n_known_alleles_in_partial_calls`, and
+`n_missing_alleles_in_partial_calls` describe all partial GT fields,
 including those superseded by usable GP.
 
-n_partial_gt_scored_hard counts partial GT rows actually handled by
+`n_partial_gt_scored_hard` counts partial GT rows actually handled by
 hard-call scoring rules.
 
 `effect_allele_dosage` remains an effect-allele count: it can be fractional
@@ -514,7 +514,7 @@ with usable GP coverage; inspect `gp_used` and the scoring status.
 The default publishing mode is `copy`; it can be changed with
 `--publish_dir_mode`.
 
-## Important limitations
+## Important warnings and limitations
 
 - This is a **SNP scoring** pipeline. Unsupported score alleles are
   skipped with QC accounting; a non-SNP VCF record whose REF span or declared 
