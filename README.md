@@ -9,15 +9,15 @@ For each retained score row, by default the pipeline uses additive scoring based
 
 ```text
 effect_allele_dosage = number of called alleles in the effect_allele set
-scoring_multiplier  = effect_allele_dosage
-contribution        = effect_weight × scoring_multiplier
-PRS                 = sum of contributions
+scoring_multiplier   = effect_allele_dosage
+contribution         = effect_weight × scoring_multiplier
+PRS                  = sum of contributions
 ```
 
 `--genotype_calls soft` optionally uses genotype posterior probabilities
 from FORMAT/GP (see [Hard and soft genotype scoring](#hard-and-soft-genotype-scoring)); 
 `--non_additive` instead uses an explicitly specified set of effect genotypes 
-(see [Non-additive genotype models](non-additive-genotype-models)).
+(see [Non-additive genotype models](#non-additive-genotype-models)).
 
 The dosage is the number of called genotype alleles belonging to the score
 row's `effect_allele` set. The final result is a raw PRS; to standardize it, 
